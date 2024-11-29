@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 import asyncio
 from pydantic import BaseModel
 from typing import Optional, Dict
@@ -9,12 +8,10 @@ import numpy as np
 from pathlib import Path
 import io
 import base64
-from PIL import Image
-from smile_detector import SmileDetector, ProcessingConfig
+from smile_detector import SmileDetector, ProcessingConfig, RoiPosition
 
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -29,12 +26,6 @@ is_processing = False
 should_stop = False
 active_task = None
 
-class RoiPosition(BaseModel):
-    top: float
-    bottom: float
-    left: float
-    right: float
-
 class ProcessingParams(BaseModel):
     debug: bool
     skipFrames: int
@@ -42,62 +33,12 @@ class ProcessingParams(BaseModel):
     roiPosition: RoiPosition
 
 def encode_frame_to_base64(frame):
-    """Convert OpenCV frame to base64 string"""
     _, buffer = cv2.imencode('.jpg', frame)
     return base64.b64encode(buffer).decode('utf-8')
-
-async def process_video(params: ProcessingParams):
-    global detector, is_processing, should_stop, active_task
-    
-    try:
-        config = ProcessingConfig(
-            skip_frames=params.skipFrames,
-            min_smile_duration=0.5,
-            debug=params.debug,
-            frame_buffer_size=2,
-            smile_sensitivity=params.smileSensitivity,
-            roi_position=params.roiPosition
-        )
-        
-        detector = SmileDetector(config)
-        
-        video_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/1 VIDEO'
-        output_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/2 SMILES'
-        
-        video_files = list(video_dir.glob('*.[mM][pP]4'))
-        video_files.extend(video_dir.glob('*.[mM][oO][vV]'))
-        video_files.extend(video_dir.glob('*.[aA][vV][iI]'))
-        
-        if not video_files:
-            raise ValueError("No video files found")
-        
-        video_file = video_files[0]
-        video_output_dir = output_dir / video_file.stem
-        
-        def check_should_stop():
-            return should_stop
-        
-        num_smiles = detector.extract_smiles_from_video(
-            video_file, 
-            video_output_dir,
-            should_stop_check=check_should_stop
-        )
-        
-        return num_smiles
-        
-    except Exception as e:
-        print(f"Error during processing: {str(e)}")
-        raise e
-    finally:
-        is_processing = False
-        should_stop = False
-        active_task = None
 
 @app.get("/api/preview-frame")
 async def get_preview_frame():
     video_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/1 VIDEO'
-    
-    # Get first video file
     video_files = list(video_dir.glob('*.[mM][pP]4'))
     video_files.extend(video_dir.glob('*.[mM][oO][vV]'))
     video_files.extend(video_dir.glob('*.[aA][vV][iI]'))
@@ -116,8 +57,7 @@ async def get_preview_frame():
         ret, frame = cap.read()
         if not ret:
             raise HTTPException(status_code=500, detail="Could not read frame from video")
-            
-        # Resize frame for preview
+        
         height, width = frame.shape[:2]
         max_dimension = 1280
         if width > max_dimension or height > max_dimension:
@@ -128,12 +68,61 @@ async def get_preview_frame():
         
         frame_base64 = encode_frame_to_base64(frame)
         return {"frame": frame_base64, "dimensions": {"width": frame.shape[1], "height": frame.shape[0]}}
-        
     finally:
         cap.release()
 
+async def process_video(params: ProcessingParams):
+    global detector, is_processing, should_stop, active_task
+    
+    try:
+        config = ProcessingConfig(
+            skip_frames=params.skipFrames,
+            min_smile_duration=0.5,
+            debug=params.debug,
+            frame_buffer_size=2,
+            smile_sensitivity=params.smileSensitivity,
+            roi_position=params.roiPosition
+        )
+        
+        detector = SmileDetector(config)
+        video_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/1 VIDEO'
+        output_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/2 SMILES'
+        
+        video_files = list(video_dir.glob('*.[mM][pP]4'))
+        video_files.extend(video_dir.glob('*.[mM][oO][vV]'))
+        video_files.extend(video_dir.glob('*.[aA][vV][iI]'))
+        
+        if not video_files:
+            raise ValueError("No video files found")
+        
+        video_file = video_files[0]
+        video_output_dir = output_dir / video_file.stem
+        
+        def check_should_stop():
+            return should_stop
+        
+        num_smiles = await asyncio.to_thread(
+            detector.extract_smiles_from_video,
+            video_file,
+            video_output_dir,
+            check_should_stop
+        )
+        return num_smiles
+        
+    except asyncio.CancelledError:
+        print("Processing cancelled")
+        return 0
+    except Exception as e:
+        print(f"Error during processing: {str(e)}")
+        raise e
+    finally:
+        print("Cleaning up processing state")
+        is_processing = False
+        should_stop = False
+        active_task = None
+
 @app.post("/api/start-processing")
-async def start_processing(params: ProcessingParams, background_tasks: BackgroundTasks):
+async def start_processing(params: ProcessingParams):
     global is_processing, should_stop, active_task
     
     if is_processing:
@@ -142,9 +131,7 @@ async def start_processing(params: ProcessingParams, background_tasks: Backgroun
     is_processing = True
     should_stop = False
     
-    # Create task for processing
     active_task = asyncio.create_task(process_video(params))
-    
     try:
         num_smiles = await active_task
         return {
@@ -160,17 +147,23 @@ async def start_processing(params: ProcessingParams, background_tasks: Backgroun
 async def stop_processing():
     global is_processing, should_stop, active_task
     
+    print("Stop processing requested")
+    
     if not is_processing:
         return {"status": "success", "message": "No processing in progress"}
     
     should_stop = True
     is_processing = False
     
-    if active_task:
+    if active_task and not active_task.done():
+        print("Cancelling active task")
+        active_task.cancel()
         try:
-            active_task.cancel()
-        except:
-            pass
+            await active_task
+        except asyncio.CancelledError:
+            print("Task successfully cancelled")
+        except Exception as e:
+            print(f"Error during cancellation: {e}")
     
     return {"status": "success", "message": "Processing stopped"}
 

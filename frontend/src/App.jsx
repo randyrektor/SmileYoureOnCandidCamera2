@@ -18,7 +18,6 @@ const SmileDetectorApp = () => {
   const canvasRef = useRef(null);
   const logsEndRef = useRef(null);
 
-  // Auto-scroll logs
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
@@ -82,6 +81,7 @@ const SmileDetectorApp = () => {
   const handleStartProcessing = async () => {
     try {
       if (isProcessing) {
+        addLog('Stopping processing...');
         const response = await fetch('http://localhost:8000/api/stop-processing', {
           method: 'POST'
         });
@@ -119,18 +119,18 @@ const SmileDetectorApp = () => {
    
         const result = await response.json();
         addLog(result.message);
+        setIsProcessing(false);
       }
     } catch (error) {
       console.error('Error:', error);
       addLog(`Error: ${error.message}`);
       setIsProcessing(false);
     }
-   };
+  };
   
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Smile Detector Control Panel</h1>
           <div className="space-x-4">
@@ -148,7 +148,6 @@ const SmileDetectorApp = () => {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Preview Section */}
           <div className="lg:col-span-2 bg-gray-800 rounded-lg p-4">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold">Preview</h2>
@@ -169,11 +168,9 @@ const SmileDetectorApp = () => {
             </div>
           </div>
 
-          {/* Controls Section */}
           <div className="bg-gray-800 rounded-lg p-4">
             <h2 className="text-xl font-semibold mb-4">Controls</h2>
             <div className="space-y-6">
-              {/* Debug Toggle */}
               <div className="flex items-center justify-between">
                 <label>Debug Mode</label>
                 <button
@@ -188,7 +185,6 @@ const SmileDetectorApp = () => {
                 </button>
               </div>
 
-              {/* Skip Frames Slider */}
               <div className="space-y-2">
                 <label>Processing Speed (Skip Frames)</label>
                 <input
@@ -204,7 +200,6 @@ const SmileDetectorApp = () => {
                 </div>
               </div>
 
-              {/* Smile Sensitivity Slider */}
               <div className="space-y-2">
                 <label>Smile Sensitivity</label>
                 <input
@@ -220,7 +215,6 @@ const SmileDetectorApp = () => {
                 </div>
               </div>
 
-              {/* ROI Controls */}
               <div className="space-y-4">
                 <h3 className="font-medium">Detection Region</h3>
                 <div className="grid grid-cols-2 gap-4">
@@ -273,7 +267,6 @@ const SmileDetectorApp = () => {
             </div>
           </div>
 
-          {/* Logs Section */}
           <div className="lg:col-span-3 bg-gray-800 rounded-lg p-4">
             <h2 className="text-xl font-semibold mb-4">Processing Logs</h2>
             <div className="bg-gray-950 rounded-lg p-4 h-[200px] overflow-y-auto font-mono text-sm">
