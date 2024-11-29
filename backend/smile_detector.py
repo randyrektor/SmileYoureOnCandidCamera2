@@ -244,7 +244,7 @@ class SmileDetector:
         return has_smile, debug_frame
 
     def extract_smiles_from_video(self, video_path: Path, output_folder: Path, 
-                                should_stop_check: Optional[Callable[[], bool]] = None) -> int:
+                            should_stop_check: Optional[Callable[[], bool]] = None) -> int:
         """Extract smiles from video"""
         should_stop_check = should_stop_check or (lambda: False)
         
@@ -260,46 +260,41 @@ class SmileDetector:
             raise ValueError(f"Error opening video file: {video_path}")
         
         try:
-            # Get video properties
             fps = video.get(cv2.CAP_PROP_FPS)
             total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
             min_smile_frames = int(self.config.min_smile_duration * fps)
             
-            # Initialize buffers
             frame_buffer = deque(maxlen=self.config.frame_buffer_size * 2 + 1)
             processed_buffer = deque(maxlen=self.config.frame_buffer_size * 2 + 1)
             
-            # Initialize counters
             frame_count = smile_count = consecutive_smiles = 0
             last_smile_frame = None
+            last_stop_check = 0  # Add this to limit stop checks
             
-            # Initialize progress tracker
             progress = ProgressTracker(total_frames)
             
             while True:
-                # Check for stop signal
-                if should_stop_check():
-                    self.logger.info("Processing stopped by user")
-                    return smile_count
+                # Only check stop status every 30 frames
+                if frame_count - last_stop_check >= 30:
+                    if should_stop_check():
+                        self.logger.info("Processing stopped by user")
+                        return smile_count
+                    last_stop_check = frame_count
                 
-                # Read frame
                 ret, frame = video.read()
                 if not ret:
                     break
                 
                 frame_buffer.append(frame.copy())
                 
-                # Process frame if needed
                 if frame_count % self.config.skip_frames == 0:
-                    # Process frame
                     is_smiling, debug_frame = self.process_frame(frame)
                     processed_buffer.append((is_smiling, debug_frame))
                     
-                    # Handle smile detection
                     if is_smiling:
                         consecutive_smiles += 1
                         if self._should_save_smile(consecutive_smiles, min_smile_frames,
-                                                 last_smile_frame, frame_count, fps):
+                                                last_smile_frame, frame_count, fps):
                             smile_count = self._save_smile_sequence(
                                 smile_count, frame_count, fps,
                                 frame_buffer, processed_buffer,
@@ -309,7 +304,6 @@ class SmileDetector:
                     else:
                         consecutive_smiles = 0
                     
-                    # Update progress
                     if status := progress.update(frame_count):
                         self.logger.info(status)
                 
