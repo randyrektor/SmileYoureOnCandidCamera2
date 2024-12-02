@@ -46,7 +46,7 @@ class ProgressTracker:
         self.update_interval = update_interval
         self.start_time = self.last_time
 
-    def update(self, frame_count: int) -> Optional[Dict]:
+    def update(self, frame_count: int) -> Optional[str]:
         current_time = time.time()
         if current_time - self.last_time >= self.update_interval:
             progress = (frame_count / self.total_frames) * 100
@@ -54,21 +54,17 @@ class ProgressTracker:
             elapsed = current_time - self.start_time
             eta = (self.total_frames - frame_count) / (frame_count / elapsed) if frame_count > 0 else 0
             
-            log_data = {
-                "type": "progress",
-                "data": {
-                    "progress": round(progress, 1),
-                    "current_frame": frame_count,
-                    "total_frames": self.total_frames,
-                    "fps": round(fps, 1),
-                    "elapsed": str(timedelta(seconds=int(elapsed))),
-                    "eta": str(timedelta(seconds=int(eta)))
-                }
-            }
+            status = (
+                f"Progress: {progress:.1f}% "
+                f"({frame_count}/{self.total_frames} frames) - "
+                f"{fps:.1f} fps - "
+                f"Elapsed: {timedelta(seconds=int(elapsed))} - "
+                f"ETA: {timedelta(seconds=int(eta))}"
+            )
             
             self.last_update = frame_count
             self.last_time = current_time
-            return log_data
+            return status
         return None
 
 class SmileDetector:
@@ -292,8 +288,8 @@ class SmileDetector:
                  frame_count - last_smile_frame > fps * 2))
 
     def _save_smile_sequence(self, smile_count: int, frame_count: int, fps: float,
-                    frame_buffer: deque, processed_buffer: deque,
-                    output_folder: Path, debug_folder: Optional[Path]) -> int:
+                           frame_buffer: deque, processed_buffer: deque,
+                           output_folder: Path, debug_folder: Optional[Path]) -> int:
         smile_count += 1
         timestamp = timedelta(seconds=frame_count/fps)
         
@@ -302,21 +298,14 @@ class SmileDetector:
             
             filename = f'smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
             cv2.imwrite(str(output_folder / filename), frame,
-                    self.config.compression_params)
+                       self.config.compression_params)
             
             if debug_folder and i < len(processed_buffer):
                 debug_filename = f'debug_smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
                 _, debug_frame = processed_buffer[i]
                 if debug_frame is not None:
                     cv2.imwrite(str(debug_folder / debug_filename), debug_frame,
-                            self.config.compression_params)
-
-        log_data = {
-            "type": "smile_saved",
-            "data": {
-                "smile_number": smile_count,
-                "timestamp": str(timestamp)
-            }
-        }
-        self.logger.info(f"Saved smile sequence {smile_count} at {timestamp}", extra={"structured": log_data})
+                              self.config.compression_params)
+        
+        self.logger.info(f"Saved smile sequence {smile_count} at {timestamp}")
         return smile_count
