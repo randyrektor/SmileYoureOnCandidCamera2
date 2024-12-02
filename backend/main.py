@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from pydantic import BaseModel
@@ -8,6 +8,8 @@ import numpy as np
 from pathlib import Path
 import io
 import base64
+import logging
+import json
 from smile_detector import SmileDetector, ProcessingConfig, RoiPosition
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -15,6 +17,9 @@ import threading
 app = FastAPI()
 executor = ThreadPoolExecutor(max_workers=1)
 processing_event = threading.Event()
+
+# WebSocket clients
+connected_clients = set()
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,9 +40,47 @@ class ProcessingParams(BaseModel):
     smileSensitivity: int
     roiPosition: RoiPosition
 
+# Custom WebSocket log handler
+class WebSocketLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            # Check if we have structured data
+            structured_data = getattr(record, 'structured', None)
+            if structured_data:
+                message = structured_data
+            else:
+                message = {
+                    "type": "log",
+                    "data": {
+                        "timestamp": record.asctime,
+                        "level": record.levelname,
+                        "message": record.getMessage()
+                    }
+                }
+            
+            # Send to all connected clients
+            for client in connected_clients:
+                asyncio.create_task(client.send_json(message))
+        except Exception as e:
+            print(f"Error sending log to WebSocket: {e}")
+
+# Initialize WebSocket handler
+websocket_handler = WebSocketLogHandler()
+logging.getLogger().addHandler(websocket_handler)
+
 def encode_frame_to_base64(frame):
     _, buffer = cv2.imencode('.jpg', frame)
     return base64.b64encode(buffer).decode('utf-8')
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        connected_clients.remove(websocket)
 
 @app.get("/api/preview-frame")
 async def get_preview_frame():
@@ -102,11 +145,9 @@ async def process_video(params: ProcessingParams):
         video_file = video_files[0]
         video_output_dir = output_dir / video_file.stem
         
-        # Use the event for stopping
         def check_should_stop():
             return processing_event.is_set()
         
-        # Run in thread pool to allow interruption
         loop = asyncio.get_running_loop()
         num_smiles = await loop.run_in_executor(
             executor,
@@ -156,7 +197,6 @@ async def stop_processing():
     if not is_processing:
         return {"status": "success", "message": "No processing in progress"}
     
-    # Set the event to signal stop
     processing_event.set()
     is_processing = False
     

@@ -1,6 +1,78 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Terminal, Settings, Play, Pause, FolderOpen } from 'lucide-react';
 
+const ProcessingLogs = () => {
+  const [logs, setLogs] = useState([]);
+  const logsEndRef = useRef(null);
+  const wsRef = useRef(null);
+
+  useEffect(() => {
+    wsRef.current = new WebSocket('ws://localhost:8000/ws');
+    
+    wsRef.current.onmessage = (event) => {
+      const log = JSON.parse(event.data);
+      setLogs(prev => [...prev, log]);
+    };
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  const renderLog = (log) => {
+    switch (log.type) {
+      case 'progress':
+        const { progress, fps, elapsed, eta } = log.data;
+        return (
+          <div className="flex items-center space-x-4 text-sm">
+            <div className="w-24">
+              <div className="h-2 bg-gray-700 rounded">
+                <div 
+                  className="h-2 bg-blue-500 rounded" 
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+            <span className="text-blue-400">{progress}%</span>
+            <span className="text-gray-500">|</span>
+            <span>{fps} fps</span>
+            <span className="text-gray-500">|</span>
+            <span>ETA: {eta}</span>
+          </div>
+        );
+      
+      case 'smile_saved':
+        return (
+          <div className="text-green-400">
+            ✓ Saved smile #{log.data.smile_number} at {log.data.timestamp}
+          </div>
+        );
+      
+      default:
+        return (
+          <div className="text-gray-300">
+            <span className="text-gray-500">[{log.data.timestamp}]</span> {log.data.message}
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="bg-gray-950 rounded-lg p-4 h-[200px] overflow-y-auto font-mono text-sm space-y-2">
+      {logs.map((log, i) => (
+        <div key={i}>{renderLog(log)}</div>
+      ))}
+      <div ref={logsEndRef} />
+    </div>
+  );
+};
+
 const SmileDetectorApp = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [debug, setDebug] = useState(false);
@@ -269,14 +341,7 @@ const SmileDetectorApp = () => {
 
           <div className="lg:col-span-3 bg-gray-800 rounded-lg p-4">
             <h2 className="text-xl font-semibold mb-4">Processing Logs</h2>
-            <div className="bg-gray-950 rounded-lg p-4 h-[200px] overflow-y-auto font-mono text-sm">
-              {logs.map((log, i) => (
-                <div key={i} className="text-gray-300">
-                  <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
-                </div>
-              ))}
-              <div ref={logsEndRef} />
-            </div>
+            <ProcessingLogs />
           </div>
         </div>
       </div>
