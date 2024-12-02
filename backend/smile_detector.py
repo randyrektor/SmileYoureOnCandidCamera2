@@ -294,29 +294,29 @@ class SmileDetector:
     def _save_smile_sequence(self, smile_count: int, frame_count: int, fps: float,
                     frame_buffer: deque, processed_buffer: deque,
                     output_folder: Path, debug_folder: Optional[Path]) -> int:
-    smile_count += 1
-    timestamp = timedelta(seconds=frame_count/fps)
-    
-    for i, frame in enumerate(frame_buffer):
-        relative_pos = i - self.config.frame_buffer_size
+        smile_count += 1
+        timestamp = timedelta(seconds=frame_count/fps)
         
-        filename = f'smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
-        cv2.imwrite(str(output_folder / filename), frame,
-                   self.config.compression_params)
-        
-        if debug_folder and i < len(processed_buffer):
-            debug_filename = f'debug_smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
-            _, debug_frame = processed_buffer[i]
-            if debug_frame is not None:
-                cv2.imwrite(str(debug_folder / debug_filename), debug_frame,
-                          self.config.compression_params)
+        for i, frame in enumerate(frame_buffer):
+            relative_pos = i - self.config.frame_buffer_size
+            
+            filename = f'smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
+            cv2.imwrite(str(output_folder / filename), frame,
+                    self.config.compression_params)
+            
+            if debug_folder and i < len(processed_buffer):
+                debug_filename = f'debug_smile_{smile_count:03d}_frame_{relative_pos:+d}_time_{timestamp}.png'
+                _, debug_frame = processed_buffer[i]
+                if debug_frame is not None:
+                    cv2.imwrite(str(debug_folder / debug_filename), debug_frame,
+                            self.config.compression_params)
 
-    log_data = {
-        "type": "smile_saved",
-        "data": {
-            "smile_number": smile_count,
-            "timestamp": str(timestamp)
+        log_data = {
+            "type": "smile_saved",
+            "data": {
+                "smile_number": smile_count,
+                "timestamp": str(timestamp)
+            }
         }
-    }
-    self.logger.info(f"Saved smile sequence {smile_count} at {timestamp}", extra={"structured": log_data})
-    return smile_count
+        self.logger.info(f"Saved smile sequence {smile_count} at {timestamp}", extra={"structured": log_data})
+        return smile_count
