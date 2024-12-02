@@ -207,7 +207,7 @@ class SmileDetector:
         return debug_frame
 
     def extract_smiles_from_video(self, video_path: Path, output_folder: Path, 
-                                should_stop_check: Callable[[], bool]) -> int:
+                            should_stop_check: Callable[[], bool]) -> int:
         self.logger.info("Starting video processing...")
         output_folder.mkdir(parents=True, exist_ok=True)
         debug_folder = output_folder / 'debug' if self.config.debug else None
@@ -229,12 +229,12 @@ class SmileDetector:
             
             frame_count = smile_count = consecutive_smiles = 0
             last_smile_frame = None
-            check_interval = 15  # Check stop status every 15 frames
             
             progress = ProgressTracker(total_frames)
             
             while True:
-                if frame_count % check_interval == 0 and should_stop_check():
+                # Check for stop signal more frequently
+                if should_stop_check():
                     self.logger.info("Processing stopped by user")
                     return smile_count
                 
@@ -245,13 +245,23 @@ class SmileDetector:
                 frame_buffer.append(frame.copy())
                 
                 if frame_count % self.config.skip_frames == 0:
+                    # Check stop signal during intensive operations
+                    if should_stop_check():
+                        self.logger.info("Processing stopped by user")
+                        return smile_count
+                    
                     is_smiling, debug_frame = self.process_frame(frame)
                     processed_buffer.append((is_smiling, debug_frame))
                     
                     if is_smiling:
                         consecutive_smiles += 1
                         if self._should_save_smile(consecutive_smiles, min_smile_frames,
-                                                 last_smile_frame, frame_count, fps):
+                                                last_smile_frame, frame_count, fps):
+                            # Check stop signal before saving
+                            if should_stop_check():
+                                self.logger.info("Processing stopped by user")
+                                return smile_count
+                            
                             smile_count = self._save_smile_sequence(
                                 smile_count, frame_count, fps,
                                 frame_buffer, processed_buffer,

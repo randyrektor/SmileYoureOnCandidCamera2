@@ -9,8 +9,12 @@ from pathlib import Path
 import io
 import base64
 from smile_detector import SmileDetector, ProcessingConfig, RoiPosition
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 app = FastAPI()
+executor = ThreadPoolExecutor(max_workers=1)
+processing_event = threading.Event()
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +27,6 @@ app.add_middleware(
 # Global state
 detector = None
 is_processing = False
-should_stop = False
 active_task = None
 
 class ProcessingParams(BaseModel):
@@ -72,9 +75,10 @@ async def get_preview_frame():
         cap.release()
 
 async def process_video(params: ProcessingParams):
-    global detector, is_processing, should_stop, active_task
+    global detector, is_processing, active_task, processing_event
     
     try:
+        processing_event.clear()  # Clear any existing stop signal
         config = ProcessingConfig(
             skip_frames=params.skipFrames,
             min_smile_duration=0.5,
@@ -98,10 +102,14 @@ async def process_video(params: ProcessingParams):
         video_file = video_files[0]
         video_output_dir = output_dir / video_file.stem
         
+        # Use the event for stopping
         def check_should_stop():
-            return should_stop
+            return processing_event.is_set()
         
-        num_smiles = await asyncio.to_thread(
+        # Run in thread pool to allow interruption
+        loop = asyncio.get_running_loop()
+        num_smiles = await loop.run_in_executor(
+            executor,
             detector.extract_smiles_from_video,
             video_file,
             video_output_dir,
@@ -109,27 +117,23 @@ async def process_video(params: ProcessingParams):
         )
         return num_smiles
         
-    except asyncio.CancelledError:
-        print("Processing cancelled")
-        return 0
     except Exception as e:
         print(f"Error during processing: {str(e)}")
         raise e
     finally:
         print("Cleaning up processing state")
         is_processing = False
-        should_stop = False
+        processing_event.clear()
         active_task = None
 
 @app.post("/api/start-processing")
 async def start_processing(params: ProcessingParams):
-    global is_processing, should_stop, active_task
+    global is_processing, active_task
     
     if is_processing:
         raise HTTPException(status_code=400, detail="Processing already in progress")
     
     is_processing = True
-    should_stop = False
     
     active_task = asyncio.create_task(process_video(params))
     try:
@@ -145,25 +149,22 @@ async def start_processing(params: ProcessingParams):
 
 @app.post("/api/stop-processing")
 async def stop_processing():
-    global is_processing, should_stop, active_task
+    global is_processing, processing_event, active_task
     
     print("Stop processing requested")
     
     if not is_processing:
         return {"status": "success", "message": "No processing in progress"}
     
-    should_stop = True
+    # Set the event to signal stop
+    processing_event.set()
     is_processing = False
     
-    if active_task and not active_task.done():
-        print("Cancelling active task")
-        active_task.cancel()
+    if active_task:
         try:
             await active_task
-        except asyncio.CancelledError:
-            print("Task successfully cancelled")
         except Exception as e:
-            print(f"Error during cancellation: {e}")
+            print(f"Error during stop: {e}")
     
     return {"status": "success", "message": "Processing stopped"}
 
