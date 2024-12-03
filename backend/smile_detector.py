@@ -91,10 +91,7 @@ class SmileDetector:
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
-        gray = clahe.apply(gray)
-        gray = cv2.convertScaleAbs(gray, alpha=1.2, beta=10)
-        return cv2.bilateralFilter(gray, 9, 75, 75)
+        return cv2.convertScaleAbs(gray, alpha=1.2, beta=10)
 
     def calculate_target_dimensions(self, frame: np.ndarray) -> Tuple[int, int]:
         height, width = frame.shape[:2]
@@ -111,32 +108,39 @@ class SmileDetector:
         return (x1, y1, x2, y2)
 
     def detect_faces(self, processed_frame: np.ndarray, roi: Tuple[int, int, int, int]) -> List[Tuple[int, int, int, int]]:
+        """
+        Detect faces within the region of interest (ROI) of a frame.
+        Returns coordinates of the largest detected face.
+        """
+        # Extract ROI
         x1, y1, x2, y2 = roi
         processed_roi = processed_frame[y1:y2, x1:x2]
         
-        # Modified cache key to be more sensitive to changes
-        frame_sum = np.sum(processed_roi[::4, ::4])  # Downsample for performance
-        cache_key = hash(str(frame_sum) + str(roi))
+        # Downsample ROI for faster processing
+        scale_factor = 0.5
+        small_roi = cv2.resize(processed_roi, None, fx=scale_factor, fy=scale_factor, 
+                            interpolation=cv2.INTER_AREA)
         
-        if cache_key in self.face_cache:
-            return self.face_cache[cache_key]
-        
+        # Detect faces in downsampled image
         faces = self.face_cascade.detectMultiScale(
-            processed_roi,
-            scaleFactor=1.15,
+            small_roi,
+            scaleFactor=1.2,
             minNeighbors=3,
-            minSize=(45, 45),
-            maxSize=(500, 500)
+            minSize=(int(45 * scale_factor), int(45 * scale_factor)),
+            maxSize=(int(500 * scale_factor), int(500 * scale_factor)),
+            flags=cv2.CASCADE_SCALE_IMAGE
         )
         
-        all_faces = [(x + x1, y + y1, w, h) for (x, y, w, h) in faces]
-        result = [max(all_faces, key=lambda rect: rect[2] * rect[3])] if all_faces else []
+        # Scale coordinates back up
+        all_faces = [(
+            int(x/scale_factor) + x1,  # x coordinate
+            int(y/scale_factor) + y1,  # y coordinate
+            int(w/scale_factor),       # width
+            int(h/scale_factor)        # height
+        ) for (x, y, w, h) in faces]
         
-        if len(self.face_cache) > self.config.cache_size:
-            self.face_cache.clear()
-        self.face_cache[cache_key] = result
-        
-        return result
+        # Return largest face only
+        return [max(all_faces, key=lambda rect: rect[2] * rect[3])] if all_faces else []
 
     def detect_smile(self, processed_frame: np.ndarray, face_rect: Tuple[int, int, int, int]) -> List[Tuple[int, int, int, int]]:
         x, y, w, h = face_rect
@@ -145,16 +149,23 @@ class SmileDetector:
         lower_half_y = int(h * 0.50)
         lower_face_roi = face_roi[lower_half_y:, :]
         
-        smile_min_size = (int(w*0.30), int(h*0.17))
-        smile_max_size = (int(w*0.85), int(h*0.50))
+        # Use sensitivity to adjust smile size range
+        # Lower sensitivity = stricter size requirements
+        base_min_width = 0.40  # Base minimum width as percentage of face width
+        base_max_width = 0.75  # Base maximum width as percentage of face width
         
-        # Invert sensitivity scale (80 becomes 25, 40 becomes 65)
-        adjusted_sensitivity = 90 - self.config.smile_sensitivity
+        # Adjust width bounds based on sensitivity (40-80 scale)
+        sensitivity_factor = (self.config.smile_sensitivity - 40) / 40  # Normalize to 0-1
+        min_width_adj = base_min_width + (0.1 * sensitivity_factor)  # Can go up to 0.50
+        max_width_adj = base_max_width - (0.15 * (1 - sensitivity_factor))  # Can go down to 0.60
+        
+        smile_min_size = (int(w * min_width_adj), int(h * 0.17))
+        smile_max_size = (int(w * max_width_adj), int(h * 0.45))
         
         smiles = self.smile_cascade.detectMultiScale(
             lower_face_roi,
             scaleFactor=1.12,
-            minNeighbors=adjusted_sensitivity,
+            minNeighbors=35,  # Fixed middle value
             minSize=smile_min_size,
             maxSize=smile_max_size
         )
@@ -162,29 +173,25 @@ class SmileDetector:
         return [(sx, sy + lower_half_y, sw, sh) for (sx, sy, sw, sh) in smiles]
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, Optional[np.ndarray]]:
-        target_width, target_height = self.calculate_target_dimensions(frame)
-        detection_frame = cv2.resize(frame, (target_width, target_height),
-                                   interpolation=cv2.INTER_AREA)
-        
-        roi = self.calculate_roi(target_width, target_height)
+        if not frame.size:
+            return False, None
+            
+        detection_frame = cv2.resize(frame, *self.calculate_target_dimensions(frame))
         processed = self.preprocess_frame(detection_frame)
+        roi = self.calculate_roi(*detection_frame.shape[:2])
         faces = self.detect_faces(processed, roi)
         
-        has_smile = False
-        smiles_dict = {}
+        if not faces:
+            return False, None if not self.config.debug else self._draw_debug(detection_frame, [], {}, roi)
+
+        smiles = self.detect_smile(processed, faces[0])
+        has_smile = bool(smiles)
         
-        if faces:
-            face_rect = faces[0]
-            smiles = self.detect_smile(processed, face_rect)
-            if smiles:
-                has_smile = True
-                smiles_dict[tuple(face_rect)] = smiles
-        
-        debug_frame = None
         if self.config.debug:
-            debug_frame = self._draw_debug(detection_frame, faces, smiles_dict, roi)
+            return has_smile, self._draw_debug(detection_frame, faces, 
+                {tuple(faces[0]): smiles} if has_smile else {})
         
-        return has_smile, debug_frame
+        return has_smile, None
 
     def _draw_debug(self, frame: np.ndarray, faces: List[Tuple[int, int, int, int]], 
                    smiles_dict: Dict, roi: Tuple[int, int, int, int]) -> np.ndarray:

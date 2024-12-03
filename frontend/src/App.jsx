@@ -211,7 +211,7 @@ const SmileDetectorApp = () => {
                   className="w-full"
                 />
                 <div className="text-sm text-gray-400">
-                  Current: {smileSensitivity} (Lower = More Sensitive)
+                  Higher = Larger Smile Required
                 </div>
               </div>
 
