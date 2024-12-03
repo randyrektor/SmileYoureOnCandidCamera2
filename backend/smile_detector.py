@@ -114,7 +114,9 @@ class SmileDetector:
         x1, y1, x2, y2 = roi
         processed_roi = processed_frame[y1:y2, x1:x2]
         
-        cache_key = hash(processed_roi.tobytes() + str(roi).encode())
+        # Modified cache key to be more sensitive to changes
+        frame_sum = np.sum(processed_roi[::4, ::4])  # Downsample for performance
+        cache_key = hash(str(frame_sum) + str(roi))
         
         if cache_key in self.face_cache:
             return self.face_cache[cache_key]
@@ -146,14 +148,17 @@ class SmileDetector:
         smile_min_size = (int(w*0.30), int(h*0.17))
         smile_max_size = (int(w*0.85), int(h*0.50))
         
+        # Invert sensitivity scale (80 becomes 25, 40 becomes 65)
+        adjusted_sensitivity = 90 - self.config.smile_sensitivity
+        
         smiles = self.smile_cascade.detectMultiScale(
             lower_face_roi,
             scaleFactor=1.12,
-            minNeighbors=self.config.smile_sensitivity,
+            minNeighbors=adjusted_sensitivity,
             minSize=smile_min_size,
             maxSize=smile_max_size
         )
-    
+
         return [(sx, sy + lower_half_y, sw, sh) for (sx, sy, sw, sh) in smiles]
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, Optional[np.ndarray]]:
