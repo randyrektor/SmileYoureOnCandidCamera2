@@ -115,6 +115,11 @@ class SmileDetector:
         # Extract ROI
         x1, y1, x2, y2 = roi
         processed_roi = processed_frame[y1:y2, x1:x2]
+
+        # Debug visualization
+        if self.config.debug:
+            debug_roi = processed_roi.copy()
+            cv2.imwrite('debug_roi.png', debug_roi)
         
         # Downsample ROI for faster processing
         scale_factor = 0.5
@@ -124,12 +129,13 @@ class SmileDetector:
         # Detect faces in downsampled image
         faces = self.face_cascade.detectMultiScale(
             small_roi,
-            scaleFactor=1.2,
-            minNeighbors=3,
-            minSize=(int(45 * scale_factor), int(45 * scale_factor)),
+            scaleFactor=1.1,
+            minNeighbors=2,
+            minSize=(int(30 * scale_factor), int(30 * scale_factor)),
             maxSize=(int(500 * scale_factor), int(500 * scale_factor)),
             flags=cv2.CASCADE_SCALE_IMAGE
         )
+        self.logger.debug(f"Faces found: {len(faces)}")
         
         # Scale coordinates back up
         all_faces = [(
@@ -143,6 +149,7 @@ class SmileDetector:
         return [max(all_faces, key=lambda rect: rect[2] * rect[3])] if all_faces else []
 
     def detect_smile(self, processed_frame: np.ndarray, face_rect: Tuple[int, int, int, int]) -> List[Tuple[int, int, int, int]]:
+        self.logger.debug("Detecting smile...")
         x, y, w, h = face_rect
         face_roi = processed_frame[y:y + h, x:x + w]
         
@@ -169,17 +176,20 @@ class SmileDetector:
             minSize=smile_min_size,
             maxSize=smile_max_size
         )
-
+        self.logger.debug(f"Found smiles: {len(smiles)}")
         return [(sx, sy + lower_half_y, sw, sh) for (sx, sy, sw, sh) in smiles]
 
     def process_frame(self, frame: np.ndarray) -> Tuple[bool, Optional[np.ndarray]]:
+        self.logger.debug("Processing frame...")
         if not frame.size:
             return False, None
             
-        detection_frame = cv2.resize(frame, *self.calculate_target_dimensions(frame))
+        target_dims = self.calculate_target_dimensions(frame)
+        detection_frame = cv2.resize(frame, (target_dims[0], target_dims[1]))
         processed = self.preprocess_frame(detection_frame)
         roi = self.calculate_roi(*detection_frame.shape[:2])
         faces = self.detect_faces(processed, roi)
+        self.logger.debug(f"After face detection: {len(faces)} faces")
         
         if not faces:
             return False, None if not self.config.debug else self._draw_debug(detection_frame, [], {}, roi)
@@ -295,9 +305,11 @@ class SmileDetector:
 
     def _should_save_smile(self, consecutive_smiles: int, min_smile_frames: int,
                           last_smile_frame: Optional[int], frame_count: int, fps: float) -> bool:
-        return (consecutive_smiles >= min_smile_frames and
+        result = (consecutive_smiles >= min_smile_frames and
                 (last_smile_frame is None or
                  frame_count - last_smile_frame > fps * 2))
+        print(f"Should save: {result}, Consecutive: {consecutive_smiles}/{min_smile_frames}")
+        return result
 
     def _save_smile_sequence(self, smile_count: int, frame_count: int, fps: float,
                            frame_buffer: deque, processed_buffer: deque,
