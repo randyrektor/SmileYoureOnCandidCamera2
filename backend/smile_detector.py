@@ -111,29 +111,21 @@ class SmileDetector:
         return (x1, y1, x2, y2)
 
     def detect_faces(self, processed_frame: np.ndarray, roi: Tuple[int, int, int, int]) -> List[Tuple[int, int, int, int]]:
-        """
-        Detect faces within the region of interest (ROI) of a frame.
-        Returns coordinates of the largest detected face.
-        """
-        # Extract ROI
         x1, y1, x2, y2 = roi
         processed_roi = processed_frame[y1:y2, x1:x2]
         
-        # Downsample ROI for faster processing
-        scale_factor = 0.5
+        scale_factor = 0.25  # Reduced from 0.5
         small_roi = cv2.resize(processed_roi, None, fx=scale_factor, fy=scale_factor, 
                             interpolation=cv2.INTER_AREA)
         
-        # Detect faces in downsampled image
         faces = self.face_cascade.detectMultiScale(
             small_roi,
-            scaleFactor=1.2,
-            minNeighbors=3,
-            minSize=(int(45 * scale_factor), int(45 * scale_factor)),
+            scaleFactor=1.3,      # Increased from 1.2 for faster detection
+            minNeighbors=2,       # Reduced from 3 to compensate for lower resolution
+            minSize=(int(35 * scale_factor), int(35 * scale_factor)),  # Reduced minimum size
             maxSize=(int(500 * scale_factor), int(500 * scale_factor)),
             flags=cv2.CASCADE_SCALE_IMAGE
         )
-        
         # Scale coordinates back up
         all_faces = [(
             int(x/scale_factor) + x1,  # x coordinate
@@ -168,7 +160,7 @@ class SmileDetector:
         smiles = self.smile_cascade.detectMultiScale(
             lower_face_roi,
             scaleFactor=1.12,
-            minNeighbors=35,  # Fixed middle value
+            minNeighbors=27,  # Fixed middle value
             minSize=smile_min_size,
             maxSize=smile_max_size
         )

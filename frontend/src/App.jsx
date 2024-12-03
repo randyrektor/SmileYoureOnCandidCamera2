@@ -190,7 +190,7 @@ const SmileDetectorApp = () => {
                 <input
                   type="range"
                   min="1"
-                  max="15"
+                  max="30"
                   value={skipFrames}
                   onChange={(e) => setSkipFrames(Number(e.target.value))}
                   className="w-full"
@@ -223,7 +223,7 @@ const SmileDetectorApp = () => {
                     <input
                       type="range"
                       min="0"
-                      max="40"
+                      max="50"
                       value={roiPosition.top}
                       onChange={(e) => setRoiPosition(prev => ({...prev, top: Number(e.target.value)}))}
                       className="w-full"
@@ -233,7 +233,7 @@ const SmileDetectorApp = () => {
                     <label className="text-sm text-gray-400">Bottom (%)</label>
                     <input
                       type="range"
-                      min="60"
+                      min="50"
                       max="100"
                       value={roiPosition.bottom}
                       onChange={(e) => setRoiPosition(prev => ({...prev, bottom: Number(e.target.value)}))}
@@ -245,7 +245,7 @@ const SmileDetectorApp = () => {
                     <input
                       type="range"
                       min="0"
-                      max="40"
+                      max="50"
                       value={roiPosition.left}
                       onChange={(e) => setRoiPosition(prev => ({...prev, left: Number(e.target.value)}))}
                       className="w-full"
@@ -255,7 +255,7 @@ const SmileDetectorApp = () => {
                     <label className="text-sm text-gray-400">Right (%)</label>
                     <input
                       type="range"
-                      min="60"
+                      min="50"
                       max="100"
                       value={roiPosition.right}
                       onChange={(e) => setRoiPosition(prev => ({...prev, right: Number(e.target.value)}))}
