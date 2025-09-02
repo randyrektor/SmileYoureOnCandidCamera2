@@ -633,3 +633,17 @@ INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
 INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
 INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
 INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57437 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+2025-09-02 11:56:45,205 - INFO - Saved best frame 77350: fear (0.884)
+2025-09-02 11:56:48,926 - INFO - Saved best frame 78600: fear (0.821)
+2025-09-02 11:56:53,823 - INFO - Saved best frame 80225: happy (0.868)
+INFO:     127.0.0.1:57591 - "GET /api/memory-pool-stats HTTP/1.1" 200 OK
+2025-09-02 11:57:35,234 - INFO - Saved best frame 96100: happy (0.828)
