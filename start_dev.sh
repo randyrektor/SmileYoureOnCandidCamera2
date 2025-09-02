@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}🚀 Starting React Baby Development Environment...${NC}"
 
 # Change to project directory
-cd /Users/randyrektor/react-baby
+cd "$(dirname "$0")"
 
 # Start backend server
 echo -e "${BLUE}Starting backend server...${NC}"

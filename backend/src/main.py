@@ -25,9 +25,9 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -77,7 +77,7 @@ class VideoProcessor:
             self.state.processing_event.clear()
             
             video_path = Path(params.videoPath)
-            output_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/2 EMOTIONS' / video_path.stem
+            output_dir = Path.home() / 'Desktop' / 'Emotion_Thumbnails' / video_path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
             
             config = ProcessingConfig(
@@ -163,9 +163,9 @@ logger.addHandler(console_handler)
 logger.addHandler(LogHandler())
 
 def ensure_directories():
-    base_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera'
-    video_dir = base_dir / '1 VIDEO'
-    output_dir = base_dir / '2 EMOTIONS'
+    base_dir = Path.home() / 'Desktop' / 'Emotion_Thumbnails'
+    video_dir = base_dir / 'Videos'
+    output_dir = base_dir / 'Results'
     
     video_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +334,7 @@ async def test_memory_pool():
 @app.get("/api/preview-frame")
 async def get_preview_frame(video_path: Optional[str] = None):
     if not video_path:
-        video_dir = Path.home() / 'Desktop/Smile Youre On Candid Camera/1 VIDEO'
+        video_dir = Path.home() / 'Desktop' / 'Emotion_Thumbnails' / 'Videos'
         video_files = VideoUtils.find_video_files(video_dir)
         
         if not video_files:

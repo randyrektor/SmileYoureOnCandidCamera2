@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}🚀 Starting React Baby Development Environment...${NC}"
 
 # Change to project directory
-cd /Users/randyrektor/react-baby
+cd "$(dirname "$0")"
 
 # Kill any existing processes on ports 8000 and 5173
 echo -e "${BLUE}Cleaning up existing processes...${NC}"
@@ -32,7 +32,7 @@ else
 fi
 
 # Start backend with correct module path
-PYTHONPATH=/Users/randyrektor/react-baby/backend python -m src.main > ../backend.log 2>&1 &
+PYTHONPATH="$(pwd)/backend" python -m src.main > ../backend.log 2>&1 &
 BACKEND_PID=$!
 
 # Verify backend process started
