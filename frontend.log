@@ -1,0 +1,43 @@
+
+> frontend@0.0.0 dev
+> vite
+
+
+  VITE v4.5.9  ready in 194 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+Browserslist: browsers data (caniuse-lite) is 8 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+11:49:54 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:49:57 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:49:57 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:50:00 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:50:04 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:02 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:07 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:11 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:13 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:16 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:24 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:28 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:31 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:35 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:41 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:45 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:49 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:50 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:52 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:55 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:55 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:51:57 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:00 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:00 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:00 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:02 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:05 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:05 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:06 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:18 a.m. [vite] hmr update /src/App.jsx, /src/index.css
+11:52:28 a.m. [vite] hmr update /src/App.jsx, /src/index.css
