@@ -49,6 +49,7 @@ function EmotionDetectorApp() {
   const [memoryPoolStats, setMemoryPoolStats] = useState(null)
   const [memoryPoolPollingInterval, setMemoryPoolPollingInterval] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [notificationBannerVisible, setNotificationBannerVisible] = useState(true)
   // Best-frame approach settings (default processing method)
   const [useBestFrameApproach, setUseBestFrameApproach] = useState(true)
   const [skipInterval, setSkipInterval] = useState(25)
@@ -58,6 +59,8 @@ function EmotionDetectorApp() {
   // Audio context for completion notification
   const audioContextRef = useRef(null)
   const audioInitializedRef = useRef(false)
+  const notificationPermissionRequestedRef = useRef(false)
+  const pendingCompletionRef = useRef(false)
 
   // Initialize audio context on first user interaction
   const initializeAudio = () => {
@@ -70,6 +73,21 @@ function EmotionDetectorApp() {
       console.log('Audio context initialized')
     } catch (error) {
       console.warn('Could not initialize audio context:', error)
+    }
+  }
+
+  // Request notification permission on first user interaction
+  const requestNotificationPermission = async () => {
+    if (notificationPermissionRequestedRef.current) return
+    
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        const permission = await Notification.requestPermission()
+        console.log('Notification permission:', permission)
+        notificationPermissionRequestedRef.current = true
+      } catch (error) {
+        console.warn('Could not request notification permission:', error)
+      }
     }
   }
 
@@ -88,7 +106,7 @@ function EmotionDetectorApp() {
 
       // Create audio element and play the completion sound
       const audio = new Audio('/completion-chime.wav')
-      audio.volume = 0.4 // Set volume to 40% for user comfort
+      audio.volume = 0.5 // Set volume to 50%
       
       const playPromise = audio.play()
       if (playPromise !== undefined) {
@@ -97,28 +115,32 @@ function EmotionDetectorApp() {
       }
     } catch (error) {
       console.warn('Could not play completion chime:', error)
-      // Fallback to browser notification
-      showCompletionNotification()
     }
   }
 
-  // Fallback notification when audio fails
+  // Browser notification (primary alert for background tabs)
   const showCompletionNotification = () => {
-    if ('Notification' in window) {
-      if (Notification.permission === 'granted') {
-        new Notification('Processing Complete', {
-          body: 'Your video processing has finished!',
-          icon: '/vite.svg'
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        const notification = new Notification('Processing Complete! 🎉', {
+          body: 'Your video processing has finished successfully.',
+          icon: '/vite.svg',
+          badge: '/vite.svg',
+          tag: 'processing-complete',
+          requireInteraction: false,
+          silent: false
         })
-      } else if (Notification.permission !== 'denied') {
-        Notification.requestPermission().then(permission => {
-          if (permission === 'granted') {
-            new Notification('Processing Complete', {
-              body: 'Your video processing has finished!',
-              icon: '/vite.svg'
-            })
-          }
-        })
+        
+        // Auto-close notification after 10 seconds
+        setTimeout(() => notification.close(), 10000)
+        
+        // Focus window when notification is clicked
+        notification.onclick = () => {
+          window.focus()
+          notification.close()
+        }
+      } catch (error) {
+        console.warn('Could not show notification:', error)
       }
     }
   }
@@ -168,10 +190,11 @@ function EmotionDetectorApp() {
     )?.id;
   };
 
-  // Initialize audio on first user interaction
+  // Initialize audio and request notification permission on first user interaction
   useEffect(() => {
     const handleUserInteraction = () => {
       initializeAudio()
+      requestNotificationPermission()
       // Remove event listeners after first interaction
       document.removeEventListener('click', handleUserInteraction)
       document.removeEventListener('keydown', handleUserInteraction)
@@ -187,6 +210,24 @@ function EmotionDetectorApp() {
       document.removeEventListener('click', handleUserInteraction)
       document.removeEventListener('keydown', handleUserInteraction)
       document.removeEventListener('touchstart', handleUserInteraction)
+    }
+  }, [])
+
+  // Handle completion when tab becomes visible (for background processing)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      // When tab becomes visible, check if there's a pending completion
+      if (!document.hidden && pendingCompletionRef.current) {
+        console.log('Tab became visible, triggering pending completion')
+        playCompletionChime()
+        pendingCompletionRef.current = false
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [])
 
@@ -316,10 +357,24 @@ function EmotionDetectorApp() {
             });
           } else if (data.type === "complete") {
             setIsProcessing(false);
-            setProgress(0);
+            setProgress(100);  // Force progress to 100%
             setProcessingStats(null);
             setIsComplete(true);
-            playCompletionChime(); // Play completion notification sound
+            
+            // Show browser notification FIRST (works even when tab is inactive)
+            showCompletionNotification();
+            
+            // Play audio chime
+            if (document.hidden) {
+              // If tab is not visible, mark completion as pending
+              // Audio will play when user switches back to tab
+              pendingCompletionRef.current = true;
+              console.log('Tab is hidden, marked completion as pending')
+            } else {
+              // Tab is visible, play audio immediately
+              playCompletionChime();
+            }
+            
             // Add completion summary log with elapsed time
             setLogs(prevLogs => {
               let elapsed = null;
@@ -704,6 +759,41 @@ function EmotionDetectorApp() {
 
   return (
     <div className="min-h-screen bg-gray-900">
+      {/* Notification Permission Banner */}
+      {notificationBannerVisible && 'Notification' in window && Notification.permission !== 'granted' && (
+        <div className="bg-blue-600 text-white px-4 py-3 relative">
+          <div className="container mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+              </svg>
+              <span className="text-sm font-medium">
+                Enable notifications to get alerts when processing completes, even when this tab is in the background
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  await requestNotificationPermission()
+                  setNotificationBannerVisible(false)
+                }}
+                className="px-3 py-1 bg-white text-blue-600 rounded font-medium text-sm hover:bg-blue-50"
+              >
+                Enable
+              </button>
+              <button
+                onClick={() => setNotificationBannerVisible(false)}
+                className="px-2 py-1 text-white hover:text-blue-100"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
       <div className="container mx-auto px-4 py-8">
         <h1 className="text-3xl font-bold mb-8">Thumbnail Faces</h1>
         
