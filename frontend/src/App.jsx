@@ -877,6 +877,7 @@ function EmotionDetectorApp() {
 
   const stopBatchProcessing = async () => {
     setIsBatchProcessing(false)
+    isBatchProcessingRef.current = false  // Reset ref
     await stopProcessing()
     
     const timestamp = new Date().toLocaleTimeString()
