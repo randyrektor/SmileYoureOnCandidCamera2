@@ -6,6 +6,7 @@ from typing import Optional, Set, List
 import cv2
 from pathlib import Path
 from .emotion_detector import EmotionDetector, ProcessingConfig, RoiPosition
+from .mediapipe_detector import MediaPipeFaceDetector
 from .utils import VideoUtils, VIDEO_EXTENSIONS
 from .websocket_manager import manager
 from .model_cache import model_cache
@@ -363,6 +364,162 @@ async def get_preview_frame(video_path: Optional[str] = None):
             "frame": frame_base64,
             "dimensions": {"width": frame.shape[1], "height": frame.shape[0]}
         }
+    finally:
+        cap.release()
+
+class DetectRoiParams(BaseModel):
+    video_path: str
+    num_samples: int = 8
+
+@app.post("/api/detect-roi")
+async def detect_roi(params: DetectRoiParams):
+    """
+    Automatically detect optimal ROI by sampling frames throughout the video
+    and analyzing face positions
+    
+    Args:
+        params: DetectRoiParams with video_path and optional num_samples
+    
+    Returns:
+        Optimal ROI position as percentages
+    """
+    if not Path(params.video_path).exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    
+    try:
+        # Run detection in executor to avoid blocking
+        loop = asyncio.get_running_loop()
+        roi_position = await loop.run_in_executor(
+            None, 
+            _detect_roi_from_video, 
+            params.video_path, 
+            params.num_samples
+        )
+        
+        return {
+            "status": "success",
+            "roi": roi_position,
+            "message": f"ROI detected from {params.num_samples} samples"
+        }
+    except Exception as e:
+        logger.error(f"Error detecting ROI: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _detect_roi_from_video(video_path: str, num_samples: int = 8) -> dict:
+    """
+    Internal function to detect ROI from video frames
+    Samples frames evenly throughout the video and finds the optimal bounding box
+    """
+    cap = cv2.VideoCapture(video_path)
+    
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        if total_frames < 1:
+            raise ValueError("Video has no frames")
+        
+        # Calculate sample positions (evenly distributed)
+        # Skip first and last 10% to avoid intro/outro
+        start_frame = int(total_frames * 0.1)
+        end_frame = int(total_frames * 0.9)
+        sample_interval = max(1, (end_frame - start_frame) // num_samples)
+        sample_positions = [start_frame + i * sample_interval for i in range(num_samples)]
+        
+        # Initialize face detector with default config
+        default_roi = RoiPosition(top=0, bottom=100, left=0, right=100)
+        config = ProcessingConfig(
+            min_emotion_duration=0.5,
+            debug=False,
+            frame_buffer_size=2,
+            emotion_sensitivity=4,
+            roi_position=default_roi,
+            target_emotions=['happy']
+        )
+        detector = MediaPipeFaceDetector(config)
+        
+        # Collect face positions from all samples
+        face_boxes = []
+        
+        logger.info(f"Sampling {num_samples} frames from video for ROI detection")
+        
+        for frame_pos in sample_positions:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+            ret, frame = cap.read()
+            
+            if not ret:
+                continue
+            
+            # Detect faces in the full frame (using full frame as ROI)
+            roi = (0, 0, frame_width, frame_height)
+            faces_with_quality = detector.detect_faces_with_quality(frame, roi)
+            
+            # Get the best quality face
+            if faces_with_quality:
+                best_face = detector.get_best_face(faces_with_quality)
+                if best_face:
+                    face_rect, quality = best_face
+                    # Only use high-quality detections
+                    if quality.overall_quality > 0.3:
+                        face_boxes.append(face_rect)
+                        logger.debug(f"Frame {frame_pos}: Found face at {face_rect}, quality: {quality.overall_quality:.2f}")
+        
+        if not face_boxes:
+            logger.warning("No faces detected in sampled frames, using default ROI")
+            return {
+                "top": 20,
+                "bottom": 65,
+                "left": 25,
+                "right": 75
+            }
+        
+        # Calculate bounding box that encompasses all detected faces
+        # Add padding around the faces for context
+        min_x = min(box[0] for box in face_boxes)
+        min_y = min(box[1] for box in face_boxes)
+        max_x = max(box[0] + box[2] for box in face_boxes)
+        max_y = max(box[1] + box[3] for box in face_boxes)
+        
+        # Add padding (30% on each side)
+        padding_x = (max_x - min_x) * 0.3
+        padding_y = (max_y - min_y) * 0.3
+        
+        min_x = max(0, min_x - padding_x)
+        min_y = max(0, min_y - padding_y)
+        max_x = min(frame_width, max_x + padding_x)
+        max_y = min(frame_height, max_y + padding_y)
+        
+        # Convert to percentages
+        roi_left = (min_x / frame_width) * 100
+        roi_right = (max_x / frame_width) * 100
+        roi_top = (min_y / frame_height) * 100
+        roi_bottom = (max_y / frame_height) * 100
+        
+        # Ensure minimum size (at least 20% of frame)
+        roi_width = roi_right - roi_left
+        roi_height = roi_bottom - roi_top
+        
+        if roi_width < 20:
+            center_x = (roi_left + roi_right) / 2
+            roi_left = max(0, center_x - 10)
+            roi_right = min(100, center_x + 10)
+        
+        if roi_height < 20:
+            center_y = (roi_top + roi_bottom) / 2
+            roi_top = max(0, center_y - 10)
+            roi_bottom = min(100, center_y + 10)
+        
+        logger.info(f"Detected ROI from {len(face_boxes)} face samples: "
+                   f"L:{roi_left:.1f}% R:{roi_right:.1f}% T:{roi_top:.1f}% B:{roi_bottom:.1f}%")
+        
+        return {
+            "top": round(roi_top, 1),
+            "bottom": round(roi_bottom, 1),
+            "left": round(roi_left, 1),
+            "right": round(roi_right, 1)
+        }
+        
     finally:
         cap.release()
 

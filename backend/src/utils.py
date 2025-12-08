@@ -2,9 +2,14 @@ import cv2
 import os
 from pathlib import Path
 import base64
+import numpy as np
+import logging
+from typing import Optional, Tuple
 
 # Constants
 VIDEO_EXTENSIONS = ['.[mM][pP]4', '.[mM][oO][vV]', '.[aA][vV][iI]']
+
+logger = logging.getLogger(__name__)
 
 class VideoUtils:
     @staticmethod

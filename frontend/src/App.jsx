@@ -1,9 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { FolderOpen } from 'lucide-react'
 import * as Slider from '@radix-ui/react-slider'
 import { Tooltip } from "./components/Tooltip"
 import OptimizedProcessingTime from './optimizedProcessingTime'
-import { useState as useToggleState } from 'react'
 
 const formatDuration = (seconds) => {
   if (isNaN(seconds)) return '00:00'
@@ -31,7 +29,6 @@ function EmotionDetectorApp() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [progress, setProgress] = useState(0)
   const [processingStats, setProcessingStats] = useState(null)
-  const [wsConnected, setWsConnected] = useState(false)
   const [emotionSensitivity, setEmotionSensitivity] = useState(4)
 
   const [targetEmotions, setTargetEmotions] = useState(['happy', 'surprise', 'angry', 'sad', 'fear', 'disgust', 'neutral'])
@@ -54,10 +51,19 @@ function EmotionDetectorApp() {
   const [skipInterval, setSkipInterval] = useState(25)
   const [searchForward, setSearchForward] = useState(5)
   const [searchBackward, setSearchBackward] = useState(5)
+  // Auto ROI detection state
+  const [isDetectingROI, setIsDetectingROI] = useState(false)
+  // Batch processing state
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false)
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0, currentVideo: null })
+  const [batchErrors, setBatchErrors] = useState([])
+  const [batchComplete, setBatchComplete] = useState(false)
 
   // Audio context for completion notification
   const audioContextRef = useRef(null)
   const audioInitializedRef = useRef(false)
+  const processingCompleteRef = useRef(false)
+  const currentProgressRef = useRef(0)
 
   // Initialize audio context on first user interaction
   const initializeAudio = () => {
@@ -293,11 +299,9 @@ function EmotionDetectorApp() {
 
       wsInstance.onopen = () => {
         if (isUnmounted) return;
-        setWsConnected(true);
         console.log('WebSocket connected successfully');
       };
       wsInstance.onclose = (event) => {
-        setWsConnected(false);
         ws.current = null;
         wsInstance = null;
         if (!isUnmounted) {
@@ -305,7 +309,6 @@ function EmotionDetectorApp() {
         }
       };
       wsInstance.onerror = (error) => {
-        setWsConnected(false);
         console.error('WebSocket error:', error);
       };
       wsInstance.onmessage = (event) => {
@@ -313,6 +316,7 @@ function EmotionDetectorApp() {
           const data = JSON.parse(event.data);
           if (data.type === "progress") {
             setProgress(data.progress);
+            currentProgressRef.current = data.progress; // Update ref for batch processing
             setProcessingStats({
               fps: data.fps,
               elapsed: data.elapsed,
@@ -329,15 +333,20 @@ function EmotionDetectorApp() {
           } else if (data.type === "complete") {
             setIsProcessing(false);
             setProgress(100);
+            currentProgressRef.current = 100; // Update ref for batch processing
             setProcessingStats(null);
             setIsComplete(true);
+            processingCompleteRef.current = true; // Set ref for batch processing
             
-            // Play audio chime immediately (works even in background tabs via WebSocket event)
-            playCompletionChime();
-            
-            // Also show notification if user has enabled it at system level
-            if (Notification.permission === 'granted') {
-              showCompletionNotification();
+            // Only play audio/notification for single video processing (not batch)
+            if (!isBatchProcessing) {
+              // Play audio chime immediately (works even in background tabs via WebSocket event)
+              playCompletionChime();
+              
+              // Also show notification if user has enabled it at system level
+              if (Notification.permission === 'granted') {
+                showCompletionNotification();
+              }
             }
             
             // Add completion summary log with elapsed time
@@ -599,6 +608,284 @@ function EmotionDetectorApp() {
     }
   }
 
+  const detectROI = async () => {
+    if (!selectedVideo) return
+    
+    setIsDetectingROI(true)
+    
+    try {
+      const response = await fetch('http://localhost:8000/api/detect-roi', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          video_path: selectedVideo.path,
+          num_samples: 8
+        })
+      })
+      
+      if (!response.ok) throw new Error('Failed to detect ROI')
+      
+      const data = await response.json()
+      
+      if (data.status === 'success' && data.roi) {
+        // Update ROI position with detected values
+        setRoiPosition({
+          top: data.roi.top,
+          bottom: data.roi.bottom,
+          left: data.roi.left,
+          right: data.roi.right
+        })
+        
+        // Log success message
+        const now = new Date()
+        const timestamp = now.toLocaleTimeString()
+        setLogs(prevLogs => [...prevLogs, { 
+          timestamp, 
+          message: `Auto-detected ROI: ${data.message}` 
+        }])
+        
+        console.log('Auto-detected ROI:', data.roi)
+      }
+    } catch (error) {
+      console.error('Error detecting ROI:', error)
+      const now = new Date()
+      const timestamp = now.toLocaleTimeString()
+      setLogs(prevLogs => [...prevLogs, { 
+        timestamp, 
+        message: `Failed to detect ROI: ${error.message}` 
+      }])
+    } finally {
+      setIsDetectingROI(false)
+    }
+  }
+
+  const processBatchVideos = async () => {
+    if (availableVideos.length === 0) return
+    
+    setIsBatchProcessing(true)
+    setBatchComplete(false)
+    setBatchErrors([])
+    setBatchProgress({ current: 0, total: availableVideos.length, currentVideo: null })
+    
+    const now = new Date()
+    const timestamp = now.toLocaleTimeString()
+    setLogs(prevLogs => [...prevLogs, { 
+      timestamp, 
+      message: `Starting batch processing of ${availableVideos.length} videos...` 
+    }])
+    
+    for (let i = 0; i < availableVideos.length; i++) {
+      const video = availableVideos[i]
+      
+      try {
+        // Update batch progress
+        setBatchProgress({ 
+          current: i + 1, 
+          total: availableVideos.length, 
+          currentVideo: video.name 
+        })
+        
+        // Select the video (for visual feedback)
+        setSelectedVideo(video)
+        
+        // Log start of video processing
+        const startTime = new Date()
+        const startTimestamp = startTime.toLocaleTimeString()
+        setLogs(prevLogs => [...prevLogs, { 
+          timestamp: startTimestamp, 
+          message: `[${i + 1}/${availableVideos.length}] Processing: ${video.name}` 
+        }])
+        
+        // Step 1: Auto-detect ROI for this video
+        const roiResponse = await fetch('http://localhost:8000/api/detect-roi', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            video_path: video.path,
+            num_samples: 8
+          })
+        })
+        
+        if (!roiResponse.ok) throw new Error('Failed to detect ROI')
+        
+        const roiData = await roiResponse.json()
+        
+        if (roiData.status === 'success' && roiData.roi) {
+          // Update ROI for this video
+          const detectedROI = {
+            top: roiData.roi.top,
+            bottom: roiData.roi.bottom,
+            left: roiData.roi.left,
+            right: roiData.roi.right
+          }
+          setRoiPosition(detectedROI)
+          
+          // Fetch and update preview for this video
+          try {
+            const previewResponse = await fetch(
+              `http://localhost:8000/api/preview-frame?video_path=${encodeURIComponent(video.path)}`
+            )
+            if (previewResponse.ok) {
+              const previewData = await previewResponse.json()
+              const img = new Image()
+              await new Promise((resolve) => {
+                img.onload = () => {
+                  setPreviewImage(img)
+                  resolve()
+                }
+                img.src = `data:image/jpeg;base64,${previewData.frame}`
+              })
+            }
+          } catch (err) {
+            console.warn('Failed to load preview:', err)
+          }
+          
+          const roiTimestamp = new Date().toLocaleTimeString()
+          setLogs(prevLogs => [...prevLogs, { 
+            timestamp: roiTimestamp, 
+            message: `  ✓ ROI detected for ${video.name}` 
+          }])
+          
+          // Wait a moment for state to update
+          await new Promise(resolve => setTimeout(resolve, 300))
+          
+          // Step 2: Start processing with detected ROI
+          setIsProcessing(true)
+          setIsComplete(false)
+          setProgress(0)
+          setProcessingStats(null)
+          processingCompleteRef.current = false  // Reset completion flag
+          currentProgressRef.current = 0  // Reset progress
+          
+          const processResponse = await fetch('http://localhost:8000/api/start-processing', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              debug: false,
+              emotionSensitivity: emotionSensitivity,
+              roiPosition: detectedROI,
+              videoPath: video.path,
+              targetEmotions: targetEmotions,
+              useBestFrameApproach: useBestFrameApproach,
+              skipInterval: skipInterval,
+              searchForward: searchForward,
+              searchBackward: searchBackward,
+            })
+          })
+          
+          if (!processResponse.ok) {
+            throw new Error('Failed to start processing')
+          }
+          
+          // Wait for processing to complete by monitoring the ref
+          await new Promise((resolve, reject) => {
+            let checksWithoutProgress = 0
+            const maxChecksWithoutProgress = 60 // 5 minutes without progress
+            let lastSeenProgress = 0
+            
+            const checkInterval = setInterval(() => {
+              const currentProgress = currentProgressRef.current
+              const isCompleteNow = processingCompleteRef.current
+              
+              // Check for completion
+              if (isCompleteNow || currentProgress >= 100) {
+                clearInterval(checkInterval)
+                setIsProcessing(false)
+                setIsComplete(false)
+                setProgress(0)
+                processingCompleteRef.current = false // Reset for next video
+                currentProgressRef.current = 0 // Reset for next video
+                resolve()
+                return
+              }
+              
+              // Check if progress is stuck
+              if (currentProgress === lastSeenProgress) {
+                checksWithoutProgress++
+                if (checksWithoutProgress >= maxChecksWithoutProgress) {
+                  clearInterval(checkInterval)
+                  reject(new Error('Processing appears stuck (no progress for 5 minutes)'))
+                  return
+                }
+              } else {
+                checksWithoutProgress = 0
+                lastSeenProgress = currentProgress
+              }
+            }, 5000) // Check every 5 seconds
+            
+            // Safety timeout (2 hours max per video)
+            setTimeout(() => {
+              clearInterval(checkInterval)
+              reject(new Error('Processing timeout (2 hours)'))
+            }, 2 * 60 * 60 * 1000)
+          })
+          
+          const completeTimestamp = new Date().toLocaleTimeString()
+          setLogs(prevLogs => [...prevLogs, { 
+            timestamp: completeTimestamp, 
+            message: `  ✓ Completed: ${video.name}` 
+          }])
+          
+        } else {
+          throw new Error('Invalid ROI detection response')
+        }
+        
+      } catch (error) {
+        // Log error but continue with next video
+        console.error(`Error processing ${video.name}:`, error)
+        const errorTimestamp = new Date().toLocaleTimeString()
+        setLogs(prevLogs => [...prevLogs, { 
+          timestamp: errorTimestamp, 
+          message: `  ✗ Error processing ${video.name}: ${error.message}` 
+        }])
+        setBatchErrors(prev => [...prev, { video: video.name, error: error.message }])
+        
+        // Make sure processing is stopped before continuing
+        try {
+          await fetch('http://localhost:8000/api/stop-processing', { method: 'POST' })
+        } catch {}
+        setIsProcessing(false)
+        setProgress(0)
+      }
+    }
+    
+    // All videos processed
+    setIsBatchProcessing(false)
+    setBatchComplete(true)
+    
+    const finalTimestamp = new Date().toLocaleTimeString()
+    const successCount = availableVideos.length - batchErrors.length
+    setLogs(prevLogs => [...prevLogs, { 
+      timestamp: finalTimestamp, 
+      message: `Batch complete! Processed ${successCount} of ${availableVideos.length} videos successfully.` 
+    }])
+    
+    // Play completion sound only now (after ALL videos are done)
+    playCompletionChime()
+    
+    // Show notification
+    if (Notification.permission === 'granted') {
+      showCompletionNotification()
+    }
+  }
+
+  const stopBatchProcessing = async () => {
+    setIsBatchProcessing(false)
+    await stopProcessing()
+    
+    const timestamp = new Date().toLocaleTimeString()
+    setLogs(prevLogs => [...prevLogs, { 
+      timestamp, 
+      message: 'Batch processing stopped by user.' 
+    }])
+  }
+
   const calculateEstimatedTime = () => {
     if (!selectedVideo) return 'N/A'
     try {
@@ -746,9 +1033,12 @@ function EmotionDetectorApp() {
                 <button
                   key={video.path}
                   onClick={() => handleVideoSelect(video)}
+                  disabled={isBatchProcessing}
                   className={`p-2 rounded-lg text-left flex justify-between items-center ${
                     selectedVideo?.path === video.path
                       ? 'bg-blue-600'
+                      : isBatchProcessing
+                      ? 'bg-gray-700 cursor-not-allowed opacity-50'
                       : 'bg-gray-700 hover:bg-gray-600'
                   }`}
                 >
@@ -763,6 +1053,34 @@ function EmotionDetectorApp() {
             <div className="lg:col-span-2 bg-gray-800 rounded-lg p-4">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-xl font-semibold">Preview</h2>
+                <button
+                  onClick={detectROI}
+                  disabled={!selectedVideo || isProcessing || isDetectingROI}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 ${
+                    !selectedVideo || isProcessing || isDetectingROI
+                      ? 'bg-gray-700 cursor-not-allowed text-gray-500'
+                      : 'bg-blue-600 hover:bg-blue-500 text-white'
+                  }`}
+                  title="Automatically detect optimal ROI based on face positions"
+                >
+                  {isDetectingROI ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Detecting...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      Auto-Detect ROI
+                    </>
+                  )}
+                </button>
               </div>
               <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
                 <canvas
@@ -835,12 +1153,12 @@ function EmotionDetectorApp() {
                   Estimated processing time: {estimatedTime}
                 </div>
 
-                <div>
+                <div className="space-y-2">
                   <button
                     onClick={isProcessing ? stopProcessing : startProcessing}
-                    disabled={!selectedVideo || targetEmotions.length === 0}
+                    disabled={!selectedVideo || targetEmotions.length === 0 || isBatchProcessing}
                     className={`w-full px-6 py-2 rounded-lg font-medium ${
-                      !selectedVideo || targetEmotions.length === 0
+                      !selectedVideo || targetEmotions.length === 0 || isBatchProcessing
                         ? 'bg-gray-700 cursor-not-allowed'
                         : isProcessing
                         ? 'bg-red-600 hover:bg-red-500'
@@ -849,6 +1167,48 @@ function EmotionDetectorApp() {
                   >
                     {isProcessing ? 'Stop Processing' : isComplete ? 'Start Processing' : 'Start Processing'}
                   </button>
+                  
+                  <button
+                    onClick={isBatchProcessing ? stopBatchProcessing : processBatchVideos}
+                    disabled={availableVideos.length === 0 || targetEmotions.length === 0 || isProcessing}
+                    className={`w-full px-6 py-2 rounded-lg font-medium ${
+                      availableVideos.length === 0 || targetEmotions.length === 0 || isProcessing
+                        ? 'bg-gray-700 cursor-not-allowed'
+                        : isBatchProcessing
+                        ? 'bg-red-600 hover:bg-red-500'
+                        : 'bg-green-500 hover:bg-green-600'
+                    }`}
+                  >
+                    {isBatchProcessing 
+                      ? 'Stop Batch Processing' 
+                      : `Process All Videos (${availableVideos.length})`
+                    }
+                  </button>
+                  
+                  {isBatchProcessing && (
+                    <div className="text-sm text-gray-400 mt-2 p-3 bg-gray-700 rounded-lg">
+                      <div className="font-semibold text-green-500 mb-1">
+                        Processing video {batchProgress.current} of {batchProgress.total}
+                      </div>
+                      {batchProgress.currentVideo && (
+                        <div className="text-xs truncate">
+                          Current: {batchProgress.currentVideo}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {batchComplete && (
+                    <div className="text-sm text-green-500 mt-2 p-3 bg-gray-700 rounded-lg">
+                      ✓ Batch processing complete! 
+                      {batchErrors.length > 0 && (
+                        <span className="text-yellow-400">
+                          {' '}({batchErrors.length} error{batchErrors.length > 1 ? 's' : ''})
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  
                   {targetEmotions.length === 0 && (
                     <div className="text-xs text-red-400 mt-2 text-center">
                       Please select at least one target emotion
@@ -880,7 +1240,7 @@ function EmotionDetectorApp() {
                     <div>Processing started...</div>
                   )
                 ) : isComplete ? (
-                  <div className="text-green-400 font-semibold">Task complete!</div>
+                  <div className="text-green-500 font-semibold">Task complete!</div>
                 ) : (
                   <div>Waiting to start processing...</div>
                 )}
