@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import * as Slider from '@radix-ui/react-slider'
 import { Tooltip } from "./components/Tooltip"
-import OptimizedProcessingTime from './optimizedProcessingTime'
+import { apiFetch, wsLogsUrl } from './api/client'
 
 const formatDuration = (seconds) => {
   if (isNaN(seconds)) return '00:00'
@@ -31,26 +31,16 @@ function EmotionDetectorApp() {
   const [processingStats, setProcessingStats] = useState(null)
   const [emotionSensitivity, setEmotionSensitivity] = useState(4)
 
-  const [targetEmotions, setTargetEmotions] = useState(['happy', 'surprise', 'angry', 'sad', 'fear', 'disgust', 'neutral'])
-  const [roiPosition, setRoiPosition] = useState({
-    top: 20,
-    bottom: 65,
-    left: 25,
-    right: 75
-  })
+  const [targetEmotions, setTargetEmotions] = useState(['happy', 'surprise', 'angry', 'sad', 'fear', 'disgust'])
+  // null until auto-detection finishes on the current preview video. Drawing
+  // a wrong default rectangle before detection is more confusing than no rect.
+  const [roiPosition, setRoiPosition] = useState(null)
   const [logs, setLogs] = useState([])
   const [isComplete, setIsComplete] = useState(false)
-  const [dragHandle, setDragHandle] = useState(null)
-  const [estimatedTime, setEstimatedTime] = useState('N/A')
-  const [modelStatus, setModelStatus] = useState(null)
-  const [memoryPoolStats, setMemoryPoolStats] = useState(null)
-  const [memoryPoolPollingInterval, setMemoryPoolPollingInterval] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
-  // Best-frame approach settings (default processing method)
-  const [useBestFrameApproach, setUseBestFrameApproach] = useState(true)
-  const [skipInterval, setSkipInterval] = useState(25)
-  const [searchForward, setSearchForward] = useState(5)
-  const [searchBackward, setSearchBackward] = useState(5)
+  // How many frames to skip between analyses. Lower = denser sampling
+  // (slower, catches shorter reactions), higher = faster.
+  const [skipInterval, setSkipInterval] = useState(3)
   // Auto ROI detection state
   const [isDetectingROI, setIsDetectingROI] = useState(false)
   // Batch processing state
@@ -58,63 +48,16 @@ function EmotionDetectorApp() {
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0, currentVideo: null })
   const [batchErrors, setBatchErrors] = useState([])
   const [batchComplete, setBatchComplete] = useState(false)
+  const [backendConnected, setBackendConnected] = useState(true)
+  const [appConfig, setAppConfig] = useState(null)
+  const [notificationPermission, setNotificationPermission] = useState(
+    typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+  )
 
-  // Audio context for completion notification
-  const audioContextRef = useRef(null)
-  const audioInitializedRef = useRef(false)
   const processingCompleteRef = useRef(false)
   const currentProgressRef = useRef(0)
-
-  // Initialize audio context on first user interaction
-  const initializeAudio = () => {
-    if (audioInitializedRef.current) return
-    
-    try {
-      // Create and initialize audio context
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)()
-      audioInitializedRef.current = true
-      console.log('Audio context initialized')
-    } catch (error) {
-      console.warn('Could not initialize audio context:', error)
-    }
-  }
-
-  // Function to play completion notification sound
-  const playCompletionChime = async () => {
-    try {
-      // Ensure audio context is initialized
-      if (!audioInitializedRef.current) {
-        initializeAudio()
-      }
-
-      // Resume audio context if suspended
-      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume()
-      }
-
-      // Create and play the completion sound
-      const audio = new Audio('/completion-chime.wav')
-      audio.volume = 0.6
-      audio.autoplay = true
-      
-      const playPromise = audio.play()
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            console.log('✅ Completion chime played successfully')
-          })
-          .catch(error => {
-            console.error('Audio play failed:', error)
-            // Retry after short delay
-            setTimeout(() => {
-              audio.play().catch(e => console.error('Audio retry failed:', e))
-            }, 100)
-          })
-      }
-    } catch (error) {
-      console.error('Could not play completion chime:', error)
-    }
-  }
+  const isBatchProcessingRef = useRef(false)
+  const isProcessingRef = useRef(false)
 
   // Browser notification (optional - only if user has enabled it)
   const showCompletionNotification = () => {
@@ -143,99 +86,79 @@ function EmotionDetectorApp() {
 
   const canvasRef = useRef(null)
   const ws = useRef(null)
+  // Tracks the most recent video we kicked off ROI detection for, so a fast
+  // user clicking through several videos doesn't end up with the wrong ROI
+  // landing last.
+  const roiRequestPathRef = useRef(null)
 
-  const getHandleAtPosition = (x, y) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    
-    // Convert to canvas coordinates
-    const canvasX = (x - rect.left) * scaleX;
-    const canvasY = (y - rect.top) * scaleY;
+  // Fallback ROI used only when auto-detection fails outright (network error,
+  // no face found, etc.). Roughly centered on a 16:9 talking-head shot.
+  const ROI_FALLBACK = { top: 20, bottom: 65, left: 25, right: 75 }
 
-    // Check each handle
-    const handlePositions = [
-      {
-        id: 'left',
-        x: canvas.width * (roiPosition.left / 100),
-        y: canvas.height * ((roiPosition.top + roiPosition.bottom) / 200)
-      },
-      {
-        id: 'right',
-        x: canvas.width * (roiPosition.right / 100),
-        y: canvas.height * ((roiPosition.top + roiPosition.bottom) / 200)
-      },
-      {
-        id: 'top',
-        x: canvas.width * ((roiPosition.left + roiPosition.right) / 200),
-        y: canvas.height * (roiPosition.top / 100)
-      },
-      {
-        id: 'bottom',
-        x: canvas.width * ((roiPosition.left + roiPosition.right) / 200),
-        y: canvas.height * (roiPosition.bottom / 100)
+  // Run auto ROI detection for a given video and update state. Idempotent: if
+  // the user clicks another video mid-flight we discard stale results.
+  const autoDetectROI = async (video) => {
+    if (!video) return
+    roiRequestPathRef.current = video.path
+    setIsDetectingROI(true)
+    try {
+      const response = await apiFetch('/api/detect-roi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_path: video.path, num_samples: 8 }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const data = await response.json()
+      if (roiRequestPathRef.current !== video.path) return
+      if (data.status === 'success' && data.roi) {
+        setRoiPosition({
+          top: data.roi.top,
+          bottom: data.roi.bottom,
+          left: data.roi.left,
+          right: data.roi.right,
+        })
+      } else {
+        setRoiPosition(ROI_FALLBACK)
       }
-    ];
+    } catch (error) {
+      console.warn('Auto ROI detection failed; using fallback:', error)
+      if (roiRequestPathRef.current === video.path) {
+        setRoiPosition(ROI_FALLBACK)
+        setLogs(prevLogs => [...prevLogs, {
+          timestamp: new Date().toLocaleTimeString(),
+          message: `ROI auto-detect failed (${error.message}); using default ROI`,
+        }])
+      }
+    } finally {
+      if (roiRequestPathRef.current === video.path) {
+        setIsDetectingROI(false)
+      }
+    }
+  }
 
-    // Find handle within 30px radius of click
-    return handlePositions.find(handle => 
-      Math.hypot(canvasX - handle.x, canvasY - handle.y) < 30
-    )?.id;
-  };
-
-  // Initialize audio on first user interaction
   useEffect(() => {
-    const handleUserInteraction = () => {
-      initializeAudio()
-      // Remove event listeners after first interaction
-      document.removeEventListener('click', handleUserInteraction)
-      document.removeEventListener('keydown', handleUserInteraction)
-      document.removeEventListener('touchstart', handleUserInteraction)
-    }
+    isBatchProcessingRef.current = isBatchProcessing
+  }, [isBatchProcessing])
 
-    // Add event listeners for user interaction
-    document.addEventListener('click', handleUserInteraction)
-    document.addEventListener('keydown', handleUserInteraction)
-    document.addEventListener('touchstart', handleUserInteraction)
-
-    return () => {
-      document.removeEventListener('click', handleUserInteraction)
-      document.removeEventListener('keydown', handleUserInteraction)
-      document.removeEventListener('touchstart', handleUserInteraction)
-    }
-  }, [])
+  useEffect(() => {
+    isProcessingRef.current = isProcessing
+  }, [isProcessing])
 
   useEffect(() => {
     const fetchAndSelectFirstVideo = async () => {
       try {
-        // Fetch model status and loading progress
+        setBackendConnected(true)
+
         try {
-          const modelResponse = await fetch('http://localhost:8000/api/model-status')
-          if (modelResponse.ok) {
-            const modelData = await modelResponse.json()
-            setModelStatus(modelData)
-            console.log("Model status:", modelData)
+          const configResponse = await apiFetch('/api/config')
+          if (configResponse.ok) {
+            setAppConfig(await configResponse.json())
           }
         } catch (error) {
-          console.warn('Could not fetch model status:', error)
+          console.warn('Could not fetch config:', error)
         }
 
-        // Fetch memory pool statistics and performance data
-        try {
-          const memoryResponse = await fetch('http://localhost:8000/api/memory-pool-stats')
-          if (memoryResponse.ok) {
-            const memoryData = await memoryResponse.json()
-            setMemoryPoolStats(memoryData.data)
-            console.log("Memory pool stats:", memoryData.data)
-          }
-        } catch (error) {
-          console.warn('Could not fetch memory pool stats:', error)
-        }
-
-        const response = await fetch('http://localhost:8000/api/available-videos')
+        const response = await apiFetch('/api/available-videos')
         if (!response.ok) throw new Error('Failed to fetch videos')
         const data = await response.json()
         
@@ -252,32 +175,30 @@ function EmotionDetectorApp() {
         if (data.videos.length > 0) {
           const firstVideo = data.videos[0]
           setSelectedVideo(firstVideo)
-          
-          // Fetch preview frame for the selected video
-          const previewResponse = await fetch(
-            `http://localhost:8000/api/preview-frame?video_path=${encodeURIComponent(firstVideo.path)}`
+
+          const previewResponse = await apiFetch(
+            `/api/preview-frame?video_path=${encodeURIComponent(firstVideo.path)}`
           )
           if (!previewResponse.ok) throw new Error('Failed to fetch preview frame')
-          
+
           const previewData = await previewResponse.json()
           const img = new Image()
           img.onload = () => {
             setPreviewImage(img)
-            drawPreviewWithOverlay(img)
           }
           img.src = `data:image/jpeg;base64,${previewData.frame}`
+
+          // Kick off ROI detection in parallel so the preview overlay snaps
+          // to the right area as soon as both the image and ROI arrive.
+          autoDetectROI(firstVideo)
         }
       } catch (error) {
         console.error('Error fetching videos:', error)
+        setBackendConnected(false)
       }
     }
 
     fetchAndSelectFirstVideo()
-    
-    // Cleanup function to stop memory pool polling when component unmounts
-    return () => {
-      stopMemoryPoolPolling()
-    }
   }, [])
 
   useEffect(() => {
@@ -294,7 +215,7 @@ function EmotionDetectorApp() {
         try { wsInstance.close(); } catch {}
         wsInstance = null;
       }
-      wsInstance = new window.WebSocket('ws://localhost:8000/ws/logs');
+      wsInstance = new window.WebSocket(wsLogsUrl());
       ws.current = wsInstance;
 
       wsInstance.onopen = () => {
@@ -338,15 +259,8 @@ function EmotionDetectorApp() {
             setIsComplete(true);
             processingCompleteRef.current = true; // Set ref for batch processing
             
-            // Only play audio/notification for single video processing (not batch)
-            if (!isBatchProcessing) {
-              // Play audio chime immediately (works even in background tabs via WebSocket event)
-              playCompletionChime();
-              
-              // Also show notification if user has enabled it at system level
-              if (Notification.permission === 'granted') {
-                showCompletionNotification();
-              }
+            if (!isBatchProcessingRef.current && Notification.permission === 'granted') {
+              showCompletionNotification();
             }
             
             // Add completion summary log with elapsed time
@@ -391,20 +305,24 @@ function EmotionDetectorApp() {
 
   const handleVideoSelect = async (video) => {
     setSelectedVideo(video)
-    
+    // Hide any previous video's ROI overlay immediately. The new one is
+    // re-detected asynchronously and will appear when ready.
+    setRoiPosition(null)
+
     try {
-      const response = await fetch(
-        `http://localhost:8000/api/preview-frame?video_path=${encodeURIComponent(video.path)}`
+      const response = await apiFetch(
+        `/api/preview-frame?video_path=${encodeURIComponent(video.path)}`
       )
       if (!response.ok) throw new Error('Failed to fetch preview frame')
-      
+
       const data = await response.json()
       const img = new Image()
       img.onload = () => {
         setPreviewImage(img)
-        drawPreviewWithOverlay(img)
       }
       img.src = `data:image/jpeg;base64,${data.frame}`
+
+      autoDetectROI(video)
     } catch (error) {
       console.error('Error grabbing frame:', error)
     }
@@ -413,15 +331,15 @@ function EmotionDetectorApp() {
   const drawPreviewWithOverlay = (img) => {
     const canvas = canvasRef.current
     const ctx = canvas.getContext('2d')
-    
-    // Clear canvas
+
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    
-    // Draw image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-    
-    // Draw ROI overlay with rounded corners
-    const cornerRadius = 12;  // Adjust this value to change the roundness
+
+    // Don't render any rectangle until ROI is known. Showing a default that
+    // doesn't match the actual face area is more misleading than no overlay.
+    if (!roiPosition) return
+
+    const cornerRadius = 12;
     
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
     ctx.beginPath();
@@ -460,97 +378,57 @@ function EmotionDetectorApp() {
     ctx.lineTo(x, y + cornerRadius);
     ctx.arcTo(x, y, x + cornerRadius, y, cornerRadius);
     ctx.stroke();
-
-    // Draw handles
-    const handlePositions = [
-      // Left handle
-      {
-        x: canvas.width * (roiPosition.left / 100),
-        y: canvas.height * ((roiPosition.top + roiPosition.bottom) / 200)
-      },
-      // Right handle
-      {
-        x: canvas.width * (roiPosition.right / 100),
-        y: canvas.height * ((roiPosition.top + roiPosition.bottom) / 200)
-      },
-      // Top handle
-      {
-        x: canvas.width * ((roiPosition.left + roiPosition.right) / 200),
-        y: canvas.height * (roiPosition.top / 100)
-      },
-      // Bottom handle
-      {
-        x: canvas.width * ((roiPosition.left + roiPosition.right) / 200),
-        y: canvas.height * (roiPosition.bottom / 100)
-      }
-    ];
-
-    // Draw white circles with shadow
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-    ctx.shadowBlur = 4;
-    ctx.fillStyle = 'white';
-    ctx.lineWidth = 2;
-    
-    handlePositions.forEach(pos => {
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Reset shadow
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
   }
 
   const startProcessing = async () => {
     if (!selectedVideo) return
-    
+
+    // ROI is detected automatically on video select. If detection hasn't
+    // finished yet (rare; ~400ms), wait for it rather than processing with
+    // a stale value.
+    if (!roiPosition || isDetectingROI) {
+      setLogs(prevLogs => [...prevLogs, {
+        timestamp: new Date().toLocaleTimeString(),
+        message: 'Waiting for ROI auto-detection to finish before processing...',
+      }])
+      return
+    }
+
     try {
       setIsProcessing(true)
       setIsComplete(false)
       setProgress(0)
       setProcessingStats(null)
-      // Start polling memory pool statistics during processing
-      startMemoryPoolPolling()
-      
-      const response = await fetch('http://localhost:8000/api/start-processing', {
+
+      const response = await apiFetch('/api/start-processing', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           debug: false,
           emotionSensitivity: emotionSensitivity,
           roiPosition: roiPosition,
           videoPath: selectedVideo.path,
           targetEmotions: targetEmotions,
-          // Best-frame approach settings
-          useBestFrameApproach: useBestFrameApproach,
           skipInterval: skipInterval,
-          searchForward: searchForward,
-          searchBackward: searchBackward,
-        })
+        }),
       })
-      
+
       if (!response.ok) {
         throw new Error('Failed to start processing')
       }
-      
+
       const result = await response.json()
       console.log('Processing started:', result)
-      
     } catch (error) {
       console.error('Error starting processing:', error)
       setIsProcessing(false)
       setProcessingStats(null)
-      // Stop polling on error
-      stopMemoryPoolPolling()
     }
   }
 
   const stopProcessing = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/stop-processing', {
+      const response = await apiFetch('/api/stop-processing', {
         method: 'POST'
       })
       
@@ -558,41 +436,15 @@ function EmotionDetectorApp() {
         setIsProcessing(false)
         setIsComplete(true)
         setProcessingStats(null)
-        // Stop polling when processing ends
-        stopMemoryPoolPolling()
       }
     } catch (error) {
       console.error('Error stopping processing:', error)
     }
   }
 
-  const startMemoryPoolPolling = () => {
-    // Poll memory pool stats every 2 seconds during processing
-    const interval = setInterval(async () => {
-      try {
-        const response = await fetch('http://localhost:8000/api/memory-pool-stats')
-        if (response.ok) {
-          const data = await response.json()
-          setMemoryPoolStats(data.data)
-        }
-      } catch (error) {
-        console.warn('Could not fetch memory pool stats:', error)
-      }
-    }, 2000)
-    
-    setMemoryPoolPollingInterval(interval)
-  }
-
-  const stopMemoryPoolPolling = () => {
-    if (memoryPoolPollingInterval) {
-      clearInterval(memoryPoolPollingInterval)
-      setMemoryPoolPollingInterval(null)
-    }
-  }
-
   const refreshVideos = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/available-videos')
+      const response = await apiFetch('/api/available-videos')
       if (!response.ok) throw new Error('Failed to fetch videos')
       const data = await response.json()
       
@@ -605,59 +457,6 @@ function EmotionDetectorApp() {
       setAvailableVideos(videosWithFormattedDurations)
     } catch (error) {
       console.error('Error refreshing videos:', error)
-    }
-  }
-
-  const detectROI = async () => {
-    if (!selectedVideo) return
-    
-    setIsDetectingROI(true)
-    
-    try {
-      const response = await fetch('http://localhost:8000/api/detect-roi', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          video_path: selectedVideo.path,
-          num_samples: 8
-        })
-      })
-      
-      if (!response.ok) throw new Error('Failed to detect ROI')
-      
-      const data = await response.json()
-      
-      if (data.status === 'success' && data.roi) {
-        // Update ROI position with detected values
-        setRoiPosition({
-          top: data.roi.top,
-          bottom: data.roi.bottom,
-          left: data.roi.left,
-          right: data.roi.right
-        })
-        
-        // Log success message
-        const now = new Date()
-        const timestamp = now.toLocaleTimeString()
-        setLogs(prevLogs => [...prevLogs, { 
-          timestamp, 
-          message: `Auto-detected ROI: ${data.message}` 
-        }])
-        
-        console.log('Auto-detected ROI:', data.roi)
-      }
-    } catch (error) {
-      console.error('Error detecting ROI:', error)
-      const now = new Date()
-      const timestamp = now.toLocaleTimeString()
-      setLogs(prevLogs => [...prevLogs, { 
-        timestamp, 
-        message: `Failed to detect ROI: ${error.message}` 
-      }])
-    } finally {
-      setIsDetectingROI(false)
     }
   }
 
@@ -676,6 +475,8 @@ function EmotionDetectorApp() {
       message: `Starting batch processing of ${availableVideos.length} videos...` 
     }])
     
+    const batchErrorsCollected = []
+
     for (let i = 0; i < availableVideos.length; i++) {
       const video = availableVideos[i]
       
@@ -699,7 +500,7 @@ function EmotionDetectorApp() {
         }])
         
         // Step 1: Auto-detect ROI for this video
-        const roiResponse = await fetch('http://localhost:8000/api/detect-roi', {
+        const roiResponse = await apiFetch('/api/detect-roi', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -726,8 +527,8 @@ function EmotionDetectorApp() {
           
           // Fetch and update preview for this video
           try {
-            const previewResponse = await fetch(
-              `http://localhost:8000/api/preview-frame?video_path=${encodeURIComponent(video.path)}`
+            const previewResponse = await apiFetch(
+              `/api/preview-frame?video_path=${encodeURIComponent(video.path)}`
             )
             if (previewResponse.ok) {
               const previewData = await previewResponse.json()
@@ -761,7 +562,7 @@ function EmotionDetectorApp() {
           processingCompleteRef.current = false  // Reset completion flag
           currentProgressRef.current = 0  // Reset progress
           
-          const processResponse = await fetch('http://localhost:8000/api/start-processing', {
+          const processResponse = await apiFetch('/api/start-processing', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -772,10 +573,7 @@ function EmotionDetectorApp() {
               roiPosition: detectedROI,
               videoPath: video.path,
               targetEmotions: targetEmotions,
-              useBestFrameApproach: useBestFrameApproach,
               skipInterval: skipInterval,
-              searchForward: searchForward,
-              searchBackward: searchBackward,
             })
           })
           
@@ -844,11 +642,12 @@ function EmotionDetectorApp() {
           timestamp: errorTimestamp, 
           message: `  ✗ Error processing ${video.name}: ${error.message}` 
         }])
-        setBatchErrors(prev => [...prev, { video: video.name, error: error.message }])
+        batchErrorsCollected.push({ video: video.name, error: error.message })
+        setBatchErrors([...batchErrorsCollected])
         
         // Make sure processing is stopped before continuing
         try {
-          await fetch('http://localhost:8000/api/stop-processing', { method: 'POST' })
+          await apiFetch('/api/stop-processing', { method: 'POST' })
         } catch {}
         setIsProcessing(false)
         setProgress(0)
@@ -860,24 +659,26 @@ function EmotionDetectorApp() {
     setBatchComplete(true)
     
     const finalTimestamp = new Date().toLocaleTimeString()
-    const successCount = availableVideos.length - batchErrors.length
+    const successCount = availableVideos.length - batchErrorsCollected.length
+    setBatchErrors(batchErrorsCollected)
     setLogs(prevLogs => [...prevLogs, { 
       timestamp: finalTimestamp, 
       message: `Batch complete! Processed ${successCount} of ${availableVideos.length} videos successfully.` 
     }])
-    
-    // Play completion sound only now (after ALL videos are done)
-    playCompletionChime()
-    
-    // Show notification
+
     if (Notification.permission === 'granted') {
       showCompletionNotification()
     }
   }
 
+  const requestNotificationPermission = async () => {
+    if (typeof Notification === 'undefined') return
+    const permission = await Notification.requestPermission()
+    setNotificationPermission(permission)
+  }
+
   const stopBatchProcessing = async () => {
     setIsBatchProcessing(false)
-    isBatchProcessingRef.current = false  // Reset ref
     await stopProcessing()
     
     const timestamp = new Date().toLocaleTimeString()
@@ -885,18 +686,6 @@ function EmotionDetectorApp() {
       timestamp, 
       message: 'Batch processing stopped by user.' 
     }])
-  }
-
-  const calculateEstimatedTime = () => {
-    if (!selectedVideo) return 'N/A'
-    try {
-      const optimizer = new OptimizedProcessingTime()
-      const result = optimizer.calculateOptimizedTime(roiPosition, selectedVideo.duration)
-      return result.displayTime
-    } catch (error) {
-      console.error('Error calculating estimated time:', error)
-      return 'N/A'
-    }
   }
 
   useEffect(() => {
@@ -907,114 +696,25 @@ function EmotionDetectorApp() {
 
   useEffect(() => {
     return () => {
-      // Cleanup on unmount
-      fetch('http://localhost:8000/api/stop-processing', { 
-        method: 'POST' 
-      }).catch(error => {
-        console.error('Error cleaning up:', error);
-      });
-    };
+      if (isProcessingRef.current || isBatchProcessingRef.current) {
+        apiFetch('/api/stop-processing', { method: 'POST' }).catch((error) => {
+          console.error('Error cleaning up:', error)
+        })
+      }
+    }
   }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const handleMouseDown = (e) => {
-      const handle = getHandleAtPosition(e.clientX, e.clientY);
-      if (handle) {
-        setDragHandle(handle);
-        e.preventDefault(); // Prevent text selection while dragging
-      }
-    };
-
-    const handleMouseMove = (e) => {
-      if (!dragHandle || !previewImage) return;
-
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      
-      // Convert mouse position to percentage
-      const x = ((e.clientX - rect.left) * scaleX / canvas.width) * 100;
-      const y = ((e.clientY - rect.top) * scaleY / canvas.height) * 100;
-
-      // Update ROI position based on which handle is being dragged
-      setRoiPosition(prev => {
-        const updated = { ...prev };
-        const minSize = 10; // Minimum 10% size
-
-        switch (dragHandle) {
-          case 'left':
-            updated.left = Math.min(Math.max(0, x), prev.right - minSize);
-            break;
-          case 'right':
-            updated.right = Math.max(Math.min(100, x), prev.left + minSize);
-            break;
-          case 'top':
-            updated.top = Math.min(Math.max(0, y), prev.bottom - minSize);
-            break;
-          case 'bottom':
-            updated.bottom = Math.max(Math.min(100, y), prev.top + minSize);
-            break;
-        }
-        return updated;
-      });
-      setTimeout(() => setEstimatedTime(calculateEstimatedTime()), 0);
-    };
-
-    const handleMouseUp = () => {
-      setDragHandle(null);
-    };
-
-    // Add event listeners
-    canvas.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    // Cleanup
-    return () => {
-      canvas.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [dragHandle, previewImage, roiPosition]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const updateCursor = (e) => {
-      const handle = getHandleAtPosition(e.clientX, e.clientY);
-      if (handle) {
-        switch (handle) {
-          case 'left':
-          case 'right':
-            canvas.style.cursor = 'ew-resize';
-            break;
-          case 'top':
-          case 'bottom':
-            canvas.style.cursor = 'ns-resize';
-            break;
-        }
-      } else {
-        canvas.style.cursor = 'default';
-      }
-    };
-
-    canvas.addEventListener('mousemove', updateCursor);
-    return () => canvas.removeEventListener('mousemove', updateCursor);
-  }, [roiPosition]);
-
-  useEffect(() => {
-    setEstimatedTime(calculateEstimatedTime())
-  }, [emotionSensitivity, roiPosition, selectedVideo])
 
   return (
     <div className="min-h-screen bg-gray-900">
       <div className="container mx-auto px-4 py-8">
-        <h1 className="text-3xl font-bold mb-8">Thumbnail Faces</h1>
-        
+        <h1 className="text-3xl font-bold mb-4">Thumbnail Faces</h1>
+
+        {!backendConnected && (
+          <div className="mb-6 p-4 rounded-lg bg-red-900/40 border border-red-700 text-red-100 text-sm">
+            Cannot reach the backend. Run <code className="px-1 py-0.5 rounded bg-gray-800">./start_dev.sh</code> from the project root (API on port 8000, UI on port 5173).
+          </div>
+        )}
+
         <div className="space-y-6">
           <div className="bg-gray-800 rounded-lg p-4">
             <div className="flex justify-between items-center mb-4">
@@ -1054,34 +754,6 @@ function EmotionDetectorApp() {
             <div className="lg:col-span-2 bg-gray-800 rounded-lg p-4">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-xl font-semibold">Preview</h2>
-                <button
-                  onClick={detectROI}
-                  disabled={!selectedVideo || isProcessing || isDetectingROI}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 ${
-                    !selectedVideo || isProcessing || isDetectingROI
-                      ? 'bg-gray-700 cursor-not-allowed text-gray-500'
-                      : 'bg-blue-600 hover:bg-blue-500 text-white'
-                  }`}
-                  title="Automatically detect optimal ROI based on face positions"
-                >
-                  {isDetectingROI ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Detecting...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                      Auto-Detect ROI
-                    </>
-                  )}
-                </button>
               </div>
               <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
                 <canvas
@@ -1092,7 +764,20 @@ function EmotionDetectorApp() {
                 />
                 {!previewImage && (
                   <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-                    No videos available 
+                    No videos available
+                  </div>
+                )}
+                {previewImage && isDetectingROI && (
+                  <div className="absolute top-3 right-3 px-3 py-1.5 rounded-md bg-gray-900/80 border border-gray-700 text-xs text-gray-200 flex items-center gap-2">
+                    <svg
+                      className="animate-spin w-3 h-3 text-blue-400"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                    >
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    Detecting face area…
                   </div>
                 )}
               </div>
@@ -1130,10 +815,9 @@ function EmotionDetectorApp() {
                   </div>
                 </div>
 
-                {/* Emotion Accuracy SECOND */}
                 <div className="space-y-2">
-                  <Tooltip text="Higher = Only save faces with more confident emotion predictions. Lower = Save more faces, but may include uncertain predictions.">
-                    <span className="text-sm">Emotion Accuracy: {emotionSensitivity}/5 (above {50 + (emotionSensitivity - 1) * 10}%)</span>
+                  <Tooltip text="How strict to be when judging expressions. Higher = fewer but more clearly expressive frames. Lower = more frames, including subtler reactions.">
+                    <span className="text-sm">Emotion Strictness: {emotionSensitivity} / 5</span>
                   </Tooltip>
                   <Slider.Root
                     className="relative flex items-center select-none touch-none h-5"
@@ -1148,25 +832,43 @@ function EmotionDetectorApp() {
                     </Slider.Track>
                     <Slider.Thumb className="block w-5 h-5 bg-white border-2 border-blue-500 rounded-full shadow focus:outline-none" />
                   </Slider.Root>
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>Loose</span>
+                    <span>Strict</span>
+                  </div>
                 </div>
 
-                <div className="text-sm text-gray-400 mb-4">
-                  Estimated processing time: {estimatedTime}
-                </div>
+                {notificationPermission !== 'granted' && notificationPermission !== 'unsupported' && (
+                  <button
+                    type="button"
+                    onClick={requestNotificationPermission}
+                    className="w-full px-4 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600"
+                  >
+                    Enable desktop notifications when processing finishes
+                  </button>
+                )}
 
                 <div className="space-y-2">
                   <button
                     onClick={isProcessing ? stopProcessing : startProcessing}
-                    disabled={!selectedVideo || targetEmotions.length === 0 || isBatchProcessing}
+                    disabled={
+                      !selectedVideo
+                      || targetEmotions.length === 0
+                      || isBatchProcessing
+                      || (!isProcessing && (isDetectingROI || !roiPosition))
+                    }
                     className={`w-full px-6 py-2 rounded-lg font-medium ${
                       !selectedVideo || targetEmotions.length === 0 || isBatchProcessing
+                      || (!isProcessing && (isDetectingROI || !roiPosition))
                         ? 'bg-gray-700 cursor-not-allowed'
                         : isProcessing
                         ? 'bg-red-600 hover:bg-red-500'
                         : 'bg-blue-600 hover:bg-blue-500'
                     }`}
                   >
-                    {isProcessing ? 'Stop Processing' : isComplete ? 'Start Processing' : 'Start Processing'}
+                    {isProcessing
+                      ? 'Stop Processing'
+                      : (isDetectingROI ? 'Detecting face area...' : 'Process One')}
                   </button>
                   
                   <button
@@ -1180,10 +882,7 @@ function EmotionDetectorApp() {
                         : 'bg-green-500 hover:bg-green-600'
                     }`}
                   >
-                    {isBatchProcessing 
-                      ? 'Stop Batch Processing' 
-                      : `Process All Videos (${availableVideos.length})`
-                    }
+                    {isBatchProcessing ? 'Stop Batch Processing' : 'Process All'}
                   </button>
                   
                   {isBatchProcessing && (
@@ -1269,122 +968,37 @@ function EmotionDetectorApp() {
               </button>
               {showAdvanced && (
                 <div className="mt-3 space-y-4">
-                  {/* Best-Frame Approach Settings */}
-                  <div className="p-3 rounded-lg bg-gray-700">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm font-medium">Best-Frame Approach (Recommended)</span>
-                      <label className="flex items-center space-x-2">
-                        <input
-                          type="checkbox"
-                          checked={useBestFrameApproach}
-                          onChange={(e) => setUseBestFrameApproach(e.target.checked)}
-                          className="rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500"
-                        />
-                        <span className="text-xs text-gray-400">Enable</span>
-                      </label>
+                  {appConfig && (
+                    <div className="p-3 rounded-lg bg-gray-700 text-xs text-gray-400 space-y-1">
+                      <div><span className="text-gray-500">Videos:</span> {appConfig.video_dir}</div>
+                      <div><span className="text-gray-500">Output:</span> {appConfig.output_dir}</div>
                     </div>
-                    {useBestFrameApproach && (
-                      <div className="space-y-3">
-                        <div className="space-y-1">
-                          <Tooltip text="Skip every N frames to check for emotions">
-                            <span className="text-xs text-gray-400">Skip Interval: {skipInterval} frames</span>
-                          </Tooltip>
-                          <Slider.Root
-                            className="relative flex items-center select-none touch-none h-4"
-                            value={[skipInterval]}
-                            min={10}
-                            max={50}
-                            step={5}
-                            onValueChange={([value]) => setSkipInterval(value)}
-                          >
-                            <Slider.Track className="bg-gray-600 relative grow rounded-full h-1">
-                              <Slider.Range className="absolute bg-blue-500 rounded-full h-full" />
-                            </Slider.Track>
-                            <Slider.Thumb className="block w-3 h-3 bg-white border border-blue-500 rounded-full shadow focus:outline-none" />
-                          </Slider.Root>
-                        </div>
-                        <div className="space-y-1">
-                          <Tooltip text="Search N frames forward for better emotion score">
-                            <span className="text-xs text-gray-400">Search Forward: {searchForward} frames</span>
-                          </Tooltip>
-                          <Slider.Root
-                            className="relative flex items-center select-none touch-none h-4"
-                            value={[searchForward]}
-                            min={2}
-                            max={10}
-                            step={1}
-                            onValueChange={([value]) => setSearchForward(value)}
-                          >
-                            <Slider.Track className="bg-gray-600 relative grow rounded-full h-1">
-                              <Slider.Range className="absolute bg-blue-500 rounded-full h-full" />
-                            </Slider.Track>
-                            <Slider.Thumb className="block w-3 h-3 bg-white border border-blue-500 rounded-full shadow focus:outline-none" />
-                          </Slider.Root>
-                        </div>
-                        <div className="space-y-1">
-                          <Tooltip text="Search N frames backward for better emotion score">
-                            <span className="text-xs text-gray-400">Search Backward: {searchBackward} frames</span>
-                          </Tooltip>
-                          <Slider.Root
-                            className="relative flex items-center select-none touch-none h-4"
-                            value={[searchBackward]}
-                            min={2}
-                            max={10}
-                            step={1}
-                            onValueChange={([value]) => setSearchBackward(value)}
-                          >
-                            <Slider.Track className="bg-gray-600 relative grow rounded-full h-1">
-                              <Slider.Range className="absolute bg-blue-500 rounded-full h-full" />
-                            </Slider.Track>
-                            <Slider.Thumb className="block w-3 h-3 bg-white border border-blue-500 rounded-full shadow focus:outline-none" />
-                          </Slider.Root>
-                        </div>
-                      </div>
-                    )}
+                  )}
+                  {/* Sampling rate */}
+                  <div className="p-3 rounded-lg bg-gray-700">
+                    <div className="mb-3">
+                      <span className="text-sm font-medium">Sampling</span>
+                    </div>
+                    <div className="space-y-1">
+                      <Tooltip text="Analyze every Nth frame. Lower = catches shorter reactions but slower. Higher = faster but may miss split-second expressions.">
+                        <span className="text-xs text-gray-400">Analyze every {skipInterval} frame{skipInterval === 1 ? '' : 's'}</span>
+                      </Tooltip>
+                      <Slider.Root
+                        className="relative flex items-center select-none touch-none h-4"
+                        value={[skipInterval]}
+                        min={1}
+                        max={10}
+                        step={1}
+                        onValueChange={([value]) => setSkipInterval(value)}
+                      >
+                        <Slider.Track className="bg-gray-600 relative grow rounded-full h-1">
+                          <Slider.Range className="absolute bg-blue-500 rounded-full h-full" />
+                        </Slider.Track>
+                        <Slider.Thumb className="block w-3 h-3 bg-white border border-blue-500 rounded-full shadow focus:outline-none" />
+                      </Slider.Root>
+                    </div>
                   </div>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Model Status Indicator */}
-                    {modelStatus && (
-                      <div className="p-3 rounded-lg bg-gray-700 h-full">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">ML Models</span>
-                          <div className="flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${modelStatus.models_loaded ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                            <span className="text-xs text-gray-400">
-                              {modelStatus.models_loaded ? 'Ready' : 'Loading...'}
-                            </span>
-                          </div>
-                        </div>
-                        {modelStatus.device && (
-                          <div className="text-xs text-gray-500 mt-1">
-                            Device: {modelStatus.device}
-                            {modelStatus.cuda_available && ` (${modelStatus.cuda_device_count} GPU${modelStatus.cuda_device_count > 1 ? 's' : ''})`}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {/* Memory Pool Stats */}
-                    {memoryPoolStats && (
-                      <div className="p-3 rounded-lg bg-gray-700 h-full">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm font-medium">Memory Pool</span>
-                          <div className="flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${memoryPoolStats.hit_rate && memoryPoolStats.hit_rate > 0.5 ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
-                            <span className="text-xs text-gray-400">
-                              {memoryPoolStats.hit_rate ? Math.round(memoryPoolStats.hit_rate * 100) : 0}% hit rate
-                            </span>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 text-xs text-gray-500">
-                          <div>Allocations: {memoryPoolStats.allocations || 0}</div>
-                          <div>Reuses: {memoryPoolStats.reuses || 0}</div>
-                          <div>Image Buffers: {memoryPoolStats.total_image_buffers || 0}</div>
-                          <div>Tensor Buffers: {memoryPoolStats.total_tensor_buffers || 0}</div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
                 </div>
               )}
             </div>

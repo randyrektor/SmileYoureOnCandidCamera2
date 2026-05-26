@@ -1,12 +1,15 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-python-multipart==0.0.6
-numpy==1.26.2
-opencv-python==4.8.1.78
-transformers==4.35.0
-torch==2.1.0
-torchvision==0.16.0
-Pillow==10.0.1
-python-dotenv==1.1.0
-mediapipe==0.10.7
-# All dependencies are now relevant to emotion detection or general video/image processing. 
+# Requires Python 3.12+ on macOS Tahoe (Darwin 25+). Python 3.9/3.10 + numpy
+# 1.26 segfaults on the new Accelerate framework; numpy 2.x fixes it but is
+# Python 3.10+ only.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+python-dotenv==1.0.1
+
+# Vision pipeline: MediaPipe Tasks Face Landmarker is the only ML model used.
+# It provides face detection, 478 facial landmarks, and 52 blendshapes in a
+# single pass - which replaces both the old face detector AND the entire
+# HuggingFace ViT emotion classifier from the previous stack.
+mediapipe==0.10.35
+opencv-python==4.10.0.84
+numpy>=2.0,<3

@@ -1,54 +1,42 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, WebSocket, WebSocketDisconnect, Request
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from pydantic import BaseModel
-from typing import Optional, Set, List
+from typing import Optional, List
 import cv2
 from pathlib import Path
+from dotenv import load_dotenv
 from .emotion_detector import EmotionDetector, ProcessingConfig, RoiPosition
-from .mediapipe_detector import MediaPipeFaceDetector
-from .utils import VideoUtils, VIDEO_EXTENSIONS
+from .face_analyzer import FaceAnalyzer
+from .utils import VideoUtils
+from .paths import get_video_dir, get_output_dir
 from .websocket_manager import manager
-from .model_cache import model_cache
-from .memory_pool import memory_pool
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import logging
 from datetime import datetime
 import os
 
+load_dotenv()
+
 # Constants
 MAX_IMAGE_DIMENSION = 1280
 
-# Create the FastAPI app instance
-app = FastAPI()
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=_log_level,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 class ProcessingParams(BaseModel):
     debug: bool = False
     emotionSensitivity: int
-
     roiPosition: RoiPosition
     videoPath: Optional[str] = None
     targetEmotions: Optional[List[str]] = None
-    # Best-frame approach settings (now the default)
-    useBestFrameApproach: bool = True  # Default to best-frame approach
-    skipInterval: int = 25
-    searchForward: int = 5
-    searchBackward: int = 5
+    # Analyze every Nth frame. Clamped to 1..10 server-side.
+    skipInterval: int = 3
 
 
 class ProcessingState:
@@ -78,25 +66,15 @@ class VideoProcessor:
             self.state.processing_event.clear()
             
             video_path = Path(params.videoPath)
-            output_dir = Path.home() / 'Desktop' / 'Smile Youre On Candid Camera' / '2 EMOTIONS' / video_path.stem
+            output_dir = get_output_dir() / video_path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
             
             config = ProcessingConfig(
-                min_emotion_duration=0.5,
                 debug=params.debug,
-                frame_buffer_size=2,
                 emotion_sensitivity=params.emotionSensitivity,
                 roi_position=params.roiPosition,
                 target_emotions=params.targetEmotions,
-                batch_size=2,  # Small batch size for frequent progress updates
-                enable_batch_processing=False,  # Disabled for maximum processing speed
-
-                # Performance optimizations for best-frame approach
-                emotion_detection_skip_frames=15,  # Process every 15th frame for best-frame approach
-                emotion_cache_size=3000,  # Large cache size for maximum performance
-                emotion_input_size=224,  # ViT model input size requirement (224x224 pixels)
-                enable_emotion_caching=True,
-                enable_batch_emotion_detection=False  # Disable batch processing to minimize overhead
+                analysis_skip_frames=max(1, min(params.skipInterval, 10)),
             )
             
             self.state.detector = EmotionDetector(config)
@@ -114,11 +92,12 @@ class VideoProcessor:
                                 )
                     
                     # Use best-frame approach by default (optimized for thumbnail selection)
-                    # Calculate emotion threshold from sensitivity: base 0.4 + sensitivity * 0.1
                     emotion_threshold = 0.4 + (params.emotionSensitivity * 0.1)
-                    logging.info(f"Using best-frame approach: skip={params.skipInterval}, "
-                               f"search={params.searchBackward}+{params.searchForward}, "
-                               f"threshold={emotion_threshold:.2f} (from sensitivity {params.emotionSensitivity})")
+                    logging.info(
+                        f"Processing skip={params.skipInterval}, "
+                        f"threshold={emotion_threshold:.2f} "
+                        f"(from sensitivity {params.emotionSensitivity})"
+                    )
                     return self.state.detector.extract_emotions_best_frames(
                         video_path,
                         output_dir,
@@ -126,8 +105,6 @@ class VideoProcessor:
                         send_progress,
                         params.skipInterval,
                         emotion_threshold,
-                        params.searchForward,
-                        params.searchBackward
                     )
                 except Exception as e:
                     logging.error(f"Thread error: {str(e)}")
@@ -163,17 +140,53 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logger.addHandler(console_handler)
 logger.addHandler(LogHandler())
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global state, processor
+
+    ensure_directories()
+    state = ProcessingState()
+    state.executor = ThreadPoolExecutor(max_workers=1)
+    state.processing_event = threading.Event()
+    processor = VideoProcessor(state)
+
+    # Eagerly download the MediaPipe model bundle so the first run is snappy.
+    try:
+        from .face_analyzer import _ensure_model
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _ensure_model)
+    except Exception as e:
+        logger.error(f"Failed to prefetch face landmarker model: {e}")
+
+    logger.info("Application started with emotion detection")
+    yield
+
+    if state.executor:
+        state.executor.shutdown(wait=False)
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
 def ensure_directories():
-    base_dir = Path.home() / 'Desktop' / 'Smile Youre On Candid Camera'
-    video_dir = base_dir / '1 VIDEO'
-    output_dir = base_dir / '2 EMOTIONS'
-    
+    video_dir = get_video_dir()
+    output_dir = get_output_dir()
+
     video_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info(f"Video directory: {video_dir}")
     logger.info(f"Output directory: {output_dir}")
-    
+
     return video_dir, output_dir
 
 @app.get("/api/available-videos")
@@ -188,6 +201,16 @@ async def get_available_videos():
             videos.append(video_info)
     
     return {"videos": videos}
+
+
+@app.get("/api/config")
+async def get_config():
+    video_dir, output_dir = ensure_directories()
+    return {
+        "video_dir": str(video_dir),
+        "output_dir": str(output_dir),
+    }
+
 
 @app.websocket("/ws/logs")
 async def websocket_logs_endpoint(websocket: WebSocket):
@@ -273,69 +296,10 @@ async def stop_processing():
         state.reset()
         return {"status": "error", "message": str(e)}
 
-@app.get("/api/model-status")
-async def get_model_status():
-    """Get the status of cached ML models"""
-    try:
-        device_info = model_cache.get_device_info()
-        return {
-            "status": "success",
-            "models_loaded": device_info["models_loaded"],
-            "device": device_info["device"],
-            "cuda_available": device_info["cuda_available"],
-            "cuda_device_count": device_info["cuda_device_count"]
-        }
-    except Exception as e:
-        logger.error(f"Error getting model status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/memory-pool-stats")
-async def get_memory_pool_stats():
-    """Get memory pool statistics and performance metrics"""
-    try:
-        stats = memory_pool.get_stats()
-        return {
-            "status": "success",
-            "data": stats
-        }
-    except Exception as e:
-        logger.error(f"Error getting memory pool stats: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
-@app.post("/api/test-memory-pool")
-async def test_memory_pool():
-    """Test endpoint to trigger memory pool activity"""
-    try:
-        import numpy as np
-        
-        # Test memory pool activity
-        buffer1 = memory_pool.get_image_buffer(100, 100, 3)
-        buffer1.fill(255)
-        memory_pool.return_image_buffer(buffer1)
-        
-        buffer2 = memory_pool.get_image_buffer(100, 100, 3)
-        memory_pool.return_image_buffer(buffer2)
-        
-        stats = memory_pool.get_stats()
-        return {
-            "status": "success",
-            "message": "Memory pool test completed",
-            "data": stats
-        }
-    except Exception as e:
-        logger.error(f"Error testing memory pool: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
 @app.get("/api/preview-frame")
 async def get_preview_frame(video_path: Optional[str] = None):
     if not video_path:
-        video_dir = Path.home() / 'Desktop' / 'Smile Youre On Candid Camera' / '1 VIDEO'
+        video_dir = get_video_dir()
         video_files = VideoUtils.find_video_files(video_dir)
         
         if not video_files:
@@ -406,73 +370,43 @@ async def detect_roi(params: DetectRoiParams):
         raise HTTPException(status_code=500, detail=str(e))
 
 def _detect_roi_from_video(video_path: str, num_samples: int = 8) -> dict:
-    """
-    Internal function to detect ROI from video frames
-    Samples frames evenly throughout the video and finds the optimal bounding box
-    """
+    """Detect a tight ROI by sampling faces across the video."""
     cap = cv2.VideoCapture(video_path)
-    
+    analyzer = None
+
     try:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         if total_frames < 1:
             raise ValueError("Video has no frames")
-        
-        # Calculate sample positions (evenly distributed)
-        # Skip first and last 10% to avoid intro/outro
+
         start_frame = int(total_frames * 0.1)
         end_frame = int(total_frames * 0.9)
         sample_interval = max(1, (end_frame - start_frame) // num_samples)
         sample_positions = [start_frame + i * sample_interval for i in range(num_samples)]
-        
-        # Initialize face detector with default config
-        default_roi = RoiPosition(top=0, bottom=100, left=0, right=100)
-        config = ProcessingConfig(
-            min_emotion_duration=0.5,
-            debug=False,
-            frame_buffer_size=2,
-            emotion_sensitivity=4,
-            roi_position=default_roi,
-            target_emotions=['happy']
-        )
-        detector = MediaPipeFaceDetector(config)
-        
-        # Collect face positions from all samples
+
+        analyzer = FaceAnalyzer(min_detection_confidence=0.3)
         face_boxes = []
-        
+
         logger.info(f"Sampling {num_samples} frames from video for ROI detection")
-        
+        full_roi = (0, 0, frame_width, frame_height)
+
         for frame_pos in sample_positions:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
             ret, frame = cap.read()
-            
             if not ret:
                 continue
-            
-            # Detect faces in the full frame (using full frame as ROI)
-            roi = (0, 0, frame_width, frame_height)
-            faces_with_quality = detector.detect_faces_with_quality(frame, roi)
-            
-            # Get the best quality face
-            if faces_with_quality:
-                best_face = detector.get_best_face(faces_with_quality)
-                if best_face:
-                    face_rect, quality = best_face
-                    # Only use high-quality detections
-                    if quality.overall_quality > 0.3:
-                        face_boxes.append(face_rect)
-                        logger.debug(f"Frame {frame_pos}: Found face at {face_rect}, quality: {quality.overall_quality:.2f}")
-        
+            analysis = analyzer.analyze(frame, full_roi)
+            if analysis is None:
+                continue
+            face_boxes.append(analysis.bbox)
+            logger.debug(f"Frame {frame_pos}: face at {analysis.bbox}")
+
         if not face_boxes:
             logger.warning("No faces detected in sampled frames, using default ROI")
-            return {
-                "top": 20,
-                "bottom": 65,
-                "left": 25,
-                "right": 75
-            }
+            return {"top": 20, "bottom": 65, "left": 25, "right": 75}
         
         # Calculate bounding box that encompasses all detected faces
         # Add padding around the faces for context
@@ -519,46 +453,11 @@ def _detect_roi_from_video(video_path: str, num_samples: int = 8) -> dict:
             "left": round(roi_left, 1),
             "right": round(roi_right, 1)
         }
-        
-    finally:
-        cap.release()
 
-@app.on_event("startup")
-async def startup_event():
-    video_dir, output_dir = ensure_directories()
-    global state, processor
-    
-    # Initialize state
-    state = ProcessingState()
-    state.executor = ThreadPoolExecutor(max_workers=1)
-    
-    # Initialize processor with default config for emotion detection
-    default_roi = RoiPosition(top=20, bottom=65, left=25, right=75)
-    config = ProcessingConfig(
-        min_emotion_duration=0.5,
-        debug=False,
-        frame_buffer_size=2,
-        emotion_sensitivity=4,  # 80% threshold (0.4 + 4 * 0.1 = 0.8)
-        focus_threshold=0.75,  # Optimized for YouTube thumbnail sharpness
-        roi_position=default_roi,
-        target_emotions=['happy', 'surprise', 'angry', 'sad', 'fear', 'disgust', 'neutral']
-    )
-    
-    processor = VideoProcessor(state)
-    state.processing_event = threading.Event()
-    
-    # Preload models in background
-    logger.info("Preloading ML models...")
-    try:
-        # This will load models in a background thread
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, model_cache.get_models)
-        logger.info("ML models preloaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to preload models: {e}")
-        # Don't fail startup - models will be loaded on first use
-    
-    logger.info("Application started with emotion detection")
+    finally:
+        if analyzer is not None:
+            analyzer.close()
+        cap.release()
 
 if __name__ == "__main__":
     import uvicorn

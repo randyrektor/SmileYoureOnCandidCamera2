@@ -7,7 +7,13 @@ import logging
 from typing import Optional, Tuple
 
 # Constants
-VIDEO_EXTENSIONS = ['.[mM][pP]4', '.[mM][oO][vV]', '.[aA][vV][iI]']
+VIDEO_EXTENSIONS = [
+    '.[mM][pP]4',
+    '.[mM][oO][vV]',
+    '.[aA][vV][iI]',
+    '.[mM][kK][vV]',
+    '.[wW][eE][bB][mM]',
+]
 
 logger = logging.getLogger(__name__)
 

@@ -68,6 +68,8 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+_work-tmp/
+.dev_pids
 
 # Output directories
 output/

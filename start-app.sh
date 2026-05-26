@@ -31,8 +31,15 @@ else
   exit 1
 fi
 
-# Start backend with correct module path
-PYTHONPATH="$(pwd)/backend" python -m src.main > ../backend.log 2>&1 &
+# Start backend with correct module path.
+#
+# Env vars below quiet MediaPipe's noisy native logs:
+#   GLOG_minloglevel=2     -> drop INFO/WARNING from glog (used by MediaPipe C++)
+#   TF_CPP_MIN_LOG_LEVEL=3 -> silence TensorFlow Lite XNNPACK delegate chatter
+# This also silences the harmless "portable_clearcut_uploader.cc" telemetry
+# error spam, which is MediaPipe trying to send anonymous stats to Google.
+GLOG_minloglevel=2 TF_CPP_MIN_LOG_LEVEL=3 \
+  PYTHONPATH="$(pwd)/backend" python -m src.main > ../backend.log 2>&1 &
 BACKEND_PID=$!
 
 # Verify backend process started
