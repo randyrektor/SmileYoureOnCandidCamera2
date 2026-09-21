@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Clear the local face landmarker model cache.
-
-Run this if the bundled MediaPipe model gets corrupted or you want to force a
-fresh download from Google's CDN.
-"""
+"""Clear the cached MediaPipe face landmarker model (forces a fresh download)."""
 
 import shutil
 import sys
@@ -18,12 +14,8 @@ def main() -> int:
         print(f"Cleared {CACHE_DIR}")
     else:
         print(f"Nothing to clear at {CACHE_DIR}")
-
-    for pycache in [Path("__pycache__"), Path("src/__pycache__"), Path(".pytest_cache")]:
-        if pycache.exists():
-            shutil.rmtree(pycache)
-            print(f"Cleared {pycache}")
-
+    for pycache in Path(__file__).parent.rglob("__pycache__"):
+        shutil.rmtree(pycache, ignore_errors=True)
     print("Done. Next run will re-download the face landmarker model.")
     return 0
 

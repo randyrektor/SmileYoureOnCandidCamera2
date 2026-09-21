@@ -1,141 +1,60 @@
 #!/bin/bash
-
-# React Baby Development Environment Starter
-# This script starts all development processes
-
-# Colors for output
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-echo -e "${BLUE}🚀 Starting React Baby Development Environment...${NC}"
-
-# Change to project directory
+# Start the backend (uvicorn) and frontend (Vite) for local development.
+# Ctrl+C stops both. Logs go to backend.log / frontend.log.
+set -euo pipefail
 cd "$(dirname "$0")"
 
-# Kill any existing processes on ports 8000 and 5173
-echo -e "${BLUE}Cleaning up existing processes...${NC}"
-lsof -ti:8000 | xargs kill -9 2>/dev/null || true
-lsof -ti:5173 | xargs kill -9 2>/dev/null || true
-sleep 3  # Give more time for processes to fully terminate
+GREEN='\033[0;32m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
+BACKEND_PORT="${REACT_BABY_PORT:-8000}"
+FRONTEND_PORT=5173
 
-# Start backend server in background
-echo -e "${BLUE}Starting backend server...${NC}"
-cd backend
-# Always activate the venv before running uvicorn
-if [ -f "venv/bin/activate" ]; then
-  source venv/bin/activate
-else
-  echo -e "${RED}❌ Python venv not found!${NC}"
+if [ ! -x backend/venv/bin/python ]; then
+  echo -e "${RED}No backend venv. Run:${NC} cd backend && python3.12 -m venv venv && venv/bin/pip install -e '.[dev]'"
   exit 1
 fi
 
-# Start backend with correct module path.
-#
-# Env vars below quiet MediaPipe's noisy native logs:
-#   GLOG_minloglevel=2     -> drop INFO/WARNING from glog (used by MediaPipe C++)
-#   TF_CPP_MIN_LOG_LEVEL=3 -> silence TensorFlow Lite XNNPACK delegate chatter
-# This also silences the harmless "portable_clearcut_uploader.cc" telemetry
-# error spam, which is MediaPipe trying to send anonymous stats to Google.
-GLOG_minloglevel=2 TF_CPP_MIN_LOG_LEVEL=3 \
-  PYTHONPATH="$(pwd)/backend" python -m src.main > ../backend.log 2>&1 &
+# Stop anything left over from a previous run of *this* script.
+./stop-app.sh --quiet
+
+echo -e "${BLUE}Starting backend on :${BACKEND_PORT}…${NC}"
+(
+  cd backend
+  # Quiet MediaPipe's native logging (glog / TF Lite XNNPACK / clearcut telemetry).
+  GLOG_minloglevel=2 TF_CPP_MIN_LOG_LEVEL=3 \
+    exec venv/bin/python -m react_baby.main
+) > backend.log 2>&1 &
 BACKEND_PID=$!
+echo "$BACKEND_PID" > .dev_pids
 
-# Verify backend process started
-sleep 2
-if ! kill -0 $BACKEND_PID 2>/dev/null; then
-    echo -e "${RED}❌ Backend failed to start!${NC}"
-    echo -e "${RED}💡 Check backend.log for errors${NC}"
-    exit 1
+for _ in $(seq 1 120); do
+  if curl -sf "http://127.0.0.1:${BACKEND_PORT}/api/health" > /dev/null; then break; fi
+  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+    echo -e "${RED}Backend exited early. Last lines of backend.log:${NC}"; tail -20 backend.log; exit 1
+  fi
+  sleep 0.5
+done
+if ! curl -sf "http://127.0.0.1:${BACKEND_PORT}/api/health" > /dev/null; then
+  echo -e "${RED}Backend did not become healthy in 60s. See backend.log.${NC}"; exit 1
 fi
+echo -e "${GREEN}Backend ready.${NC}"
 
-echo $BACKEND_PID > ../.dev_pids
-cd ..
+echo -e "${BLUE}Starting frontend on :${FRONTEND_PORT}…${NC}"
+(
+  cd frontend
+  [ -d node_modules ] || npm install --no-audit --no-fund
+  exec npm run dev -- --port "$FRONTEND_PORT" --strictPort
+) > frontend.log 2>&1 &
+FRONTEND_PID=$!
+echo "$FRONTEND_PID" >> .dev_pids
 
-# Test backend connectivity with timeout and retries
-echo -e "${BLUE}Testing backend connectivity...${NC}"
-sleep 8  # Give backend more time to start and load models
-
-# Retry logic for backend connectivity
-MAX_RETRIES=5
-RETRY_COUNT=0
-BACKEND_READY=false
-
-while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$BACKEND_READY" = false ]; do
-    echo -e "${BLUE}Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES: Testing backend...${NC}"
-    
-    if curl -s --max-time 15 http://localhost:8000/api/available-videos > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Backend is responding!${NC}"
-        echo -e "${GREEN}🚀 MediaPipe face detection is ready${NC}"
-        BACKEND_READY=true
-    else
-        echo -e "${BLUE}⏳ Backend not ready yet, waiting...${NC}"
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        sleep 5
-    fi
+for _ in $(seq 1 60); do
+  curl -sf "http://127.0.0.1:${FRONTEND_PORT}" > /dev/null && break
+  sleep 0.5
 done
 
-if [ "$BACKEND_READY" = false ]; then
-    echo -e "${RED}❌ Backend failed to start after $MAX_RETRIES attempts${NC}"
-    echo -e "${RED}💡 Check backend.log for errors${NC}"
-    echo -e "${RED}💡 You may need to manually start the backend:${NC}"
-    echo -e "${BLUE}   cd backend && source venv/bin/activate && uvicorn src.main:app --reload --host 0.0.0.0 --port 8000${NC}"
-    exit 1
-fi
+echo -e "${GREEN}Running.${NC}  UI: http://localhost:${FRONTEND_PORT}   API: http://localhost:${BACKEND_PORT}/docs"
+open "http://localhost:${FRONTEND_PORT}" 2>/dev/null || true
 
-# Start frontend server in background
-echo -e "${BLUE}Starting frontend server...${NC}"
-cd frontend
-
-# Check if node_modules exists, if not run npm install
-if [ ! -d "node_modules" ]; then
-    echo -e "${BLUE}Installing frontend dependencies...${NC}"
-    npm install
-fi
-
-npm run dev > ../frontend.log 2>&1 &
-FRONTEND_PID=$!
-
-# Verify frontend process started
-sleep 2
-if ! kill -0 $FRONTEND_PID 2>/dev/null; then
-    echo -e "${RED}❌ Frontend failed to start!${NC}"
-    echo -e "${RED}💡 Check frontend.log for errors${NC}"
-    exit 1
-fi
-
-echo $FRONTEND_PID >> ../.dev_pids
-cd ..
-
-echo -e "${GREEN}✅ Development environment started!${NC}"
-echo -e "${BLUE}Backend: http://localhost:8000${NC}"
-echo -e "${BLUE}Frontend: http://localhost:5173${NC}"
-echo ""
-
-# Open browser automatically
-echo -e "${BLUE}Opening browser...${NC}"
-sleep 3
-open http://localhost:5173
-
-# Keep the terminal open and show server logs
-echo -e "${BLUE}Servers are running. Showing logs (Ctrl+C to stop):${NC}"
-echo ""
-
-# Function to handle Ctrl+C gracefully
-cleanup() {
-    echo ""
-    echo -e "${GREEN}✅ Log display stopped.${NC}"
-    echo -e "${BLUE}Stopping all development servers...${NC}"
-    
-    # Run the stop script to properly clean up all processes
-    ./stop-app.sh
-    
-    exit 0
-}
-
-# Set up signal handler for Ctrl+C
-trap cleanup SIGINT
-
-# Tail the log files to show real-time output
-tail -f backend.log frontend.log 
+cleanup() { echo; ./stop-app.sh; exit 0; }
+trap cleanup INT TERM
+tail -n +1 -f backend.log frontend.log

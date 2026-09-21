@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "react-baby"
+version = "2.0.0"
+description = "Find thumbnail-worthy reaction frames in local videos."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141,<1",
+    "uvicorn[standard]>=0.53",
+    "python-dotenv>=1.2",
+    # MediaPipe 1.0.x aborts the process on macOS arm64 the moment any Tasks
+    # vision graph opens (google-ai-edge/mediapipe#6356). Stay on the last
+    # 0.10 release until that is fixed upstream.
+    "mediapipe==0.10.35",
+    # mediapipe itself depends on opencv-contrib-python. Pin that range here
+    # instead of adding a second, conflicting opencv-python distribution.
+    # OpenCV 5.0 has a VideoCapture exit-crash regression (opencv/opencv#30017).
+    "opencv-contrib-python>=4.13,<5",
+    "numpy>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9", "ruff>=0.16", "httpx>=0.28"]
+
+[tool.setuptools]
+packages = ["react_baby"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
